@@ -1,2 +1,4 @@
 notion-client
 python-dotenv
+pyodbc
+pandas

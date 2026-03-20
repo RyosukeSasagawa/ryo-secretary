@@ -1,0 +1,9 @@
+# APIキー・シークレット（絶対にコミットしない）
+.env
+
+# Pythonキャッシュ
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store

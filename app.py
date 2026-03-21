@@ -29,8 +29,52 @@ NOTION_DBS = [
     {"database_id": "300223f6715381259c2be6ef25fd2a10", "subject": "AI・機械学習", "material": "JOAI Competition"},
 ]
 
-# 教材番号 → インデックスの辞書
 MATERIAL_OPTIONS = {f"{i+1}. [{db['subject']}] {db['material']}": i for i, db in enumerate(NOTION_DBS)}
+
+WEEKDAY_JP = ["月", "火", "水", "木", "金", "土", "日"]
+
+
+def format_date_with_weekday(date_str: str) -> str:
+    """'2026-03-21' → '2026-03-21（土）'"""
+    d = datetime.strptime(date_str, "%Y-%m-%d").date()
+    return f"{date_str}（{WEEKDAY_JP[d.weekday()]}）"
+
+
+def auto_generate_name(date_str: str, material: str) -> str:
+    """名前プロパティを自動生成: '2026-03-21（土）瞬間英作文'"""
+    return f"{format_date_with_weekday(date_str)}{material}"
+
+
+def get_recent_records(database_id: str, n: int = 3) -> list:
+    """指定DBの直近n件の記録を取得する"""
+    try:
+        results = notion.databases.query(
+            database_id=database_id,
+            sorts=[{"property": "日付", "direction": "descending"}],
+            page_size=n,
+        ).get("results", [])
+
+        records = []
+        for page in results:
+            props = page["properties"]
+            date_prop = props.get("日付", {}).get("date")
+            date_str = date_prop.get("start", "")[:10] if date_prop else ""
+            time_prop = props.get("学習時間", {}).get("date")
+            start_time, end_time = "", ""
+            if time_prop:
+                s = time_prop.get("start", "")
+                e = time_prop.get("end", "")
+                if s and "T" in s:
+                    start_time = s[11:16]
+                if e and "T" in e:
+                    end_time = e[11:16]
+            chapter_prop = props.get("章", {}).get("rich_text", [])
+            chapter = chapter_prop[0]["text"]["content"] if chapter_prop else ""
+            if date_str:
+                records.append({"date": date_str, "start_time": start_time, "end_time": end_time, "chapter": chapter})
+        return records
+    except Exception:
+        return []
 
 
 def get_streak(database_id: str) -> int:
@@ -59,15 +103,15 @@ def get_streak(database_id: str) -> int:
 
 def register_to_notion(db_info: dict, details: dict) -> bool:
     properties = {
-        "名前": {"title": [{"text": {"content": f"{details['date']} {db_info['material']}"}}]},
+        "名前": {"title": [{"text": {"content": details["name"]}}]},
         "日付": {"date": {"start": details["date"]}},
         "学習時間": {"date": {
             "start": details["start"],
-            "end": details["end"],
+            "end":   details["end"],
         }},
-        "章": {"rich_text": [{"text": {"content": details["chapter"]}}]},
+        "章":         {"rich_text": [{"text": {"content": details["chapter"]}}]},
         "重要ポイント": {"rich_text": [{"text": {"content": details["important"]}}]},
-        "疑問": {"rich_text": [{"text": {"content": details["questions"]}}]},
+        "疑問":        {"rich_text": [{"text": {"content": details["questions"]}}]},
         "気づき・実践": {"rich_text": [{"text": {"content": details["insights"]}}]},
     }
     try:
@@ -82,8 +126,6 @@ def register_to_notion(db_info: dict, details: dict) -> bool:
 
 
 # ── セッション初期化 ──────────────────────────────────────────────────────────
-STEPS = ["material", "date", "start_time", "end_time", "chapter", "important", "questions", "insights", "confirm", "done"]
-
 if "step" not in st.session_state:
     st.session_state.step = "material"
 if "data" not in st.session_state:
@@ -92,24 +134,50 @@ if "messages" not in st.session_state:
     st.session_state.messages = [
         {"role": "assistant", "content": "こんにちは！今日何の勉強をしましたか？\n\n教材を番号で選んでください👇"}
     ]
+if "recent_records" not in st.session_state:
+    st.session_state.recent_records = []
 
 # ── ページ設定 ────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="AI学習記録秘書", page_icon="📚")
 st.title("📚 AI学習記録秘書")
 
+# ── サイドバー: セッション終了ボタン ─────────────────────────────────────────
+with st.sidebar:
+    st.markdown("### メニュー")
+    if st.button("🚪 セッションを終了する", use_container_width=True):
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.rerun()
+
 # ── チャット履歴を表示 ────────────────────────────────────────────────────────
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
-        st.markdown(msg["role"] == "assistant" and msg["content"] or msg["content"])
+        st.markdown(msg["content"])
 
-# ── 完了済みなら入力欄を非表示 ────────────────────────────────────────────────
-if st.session_state.step == "done":
+# ── 終了状態 ─────────────────────────────────────────────────────────────────
+if st.session_state.step == "finished":
+    st.success("お疲れ様でした！またね！👋")
     st.stop()
 
+# ── 登録完了後の選択 ──────────────────────────────────────────────────────────
+if st.session_state.step == "done":
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("📝 続けて記録する", use_container_width=True):
+            st.session_state.step = "material"
+            st.session_state.data = {}
+            st.session_state.recent_records = []
+            st.session_state.messages.append({"role": "assistant", "content": "続けて記録しましょう！\n\n教材を番号で選んでください👇"})
+            st.rerun()
+    with col2:
+        if st.button("👋 終了する", use_container_width=True):
+            st.session_state.messages.append({"role": "user", "content": "終了する"})
+            st.session_state.step = "finished"
+            st.rerun()
+    st.stop()
 
-# ── ステップ別の質問テキスト ──────────────────────────────────────────────────
+# ── ステップ別の質問テキスト（date はウィジェット対応のため除外）───────────────
 STEP_QUESTIONS = {
-    "date":      f"学習日を入力してください（例: {datetime.now().strftime('%Y-%m-%d')}）\n空Enterで今日になります",
     "start_time": "開始時間を入力してください（例: 04:00）",
     "end_time":   "終了時間を入力してください（例: 04:25）",
     "chapter":    "章・範囲を入力してください（例: Chapter 3）",
@@ -124,26 +192,48 @@ if st.session_state.step == "material":
     if st.button("この教材で記録する"):
         idx = MATERIAL_OPTIONS[selected_label]
         st.session_state.data["db_info"] = NOTION_DBS[idx]
+        st.session_state.recent_records = get_recent_records(NOTION_DBS[idx]["database_id"])
         st.session_state.messages.append({"role": "user", "content": selected_label})
-        st.session_state.messages.append({"role": "assistant", "content": STEP_QUESTIONS["date"]})
+        st.session_state.messages.append({"role": "assistant", "content": "学習日を選択してください📅"})
         st.session_state.step = "date"
+        st.rerun()
+
+# ── 学習日選択（カレンダーUI）────────────────────────────────────────────────
+elif st.session_state.step == "date":
+    selected_date = st.date_input("学習日", value=date.today(), label_visibility="collapsed")
+    if st.button("この日付で進む"):
+        date_str = selected_date.strftime("%Y-%m-%d")
+        st.session_state.data["date"] = date_str
+        st.session_state.messages.append({"role": "user", "content": format_date_with_weekday(date_str)})
+        st.session_state.messages.append({"role": "assistant", "content": STEP_QUESTIONS["start_time"]})
+        st.session_state.step = "start_time"
         st.rerun()
 
 # ── テキスト入力ステップ ──────────────────────────────────────────────────────
 elif st.session_state.step in STEP_QUESTIONS:
+    step = st.session_state.step
+
+    # 開始時間・終了時間・章のステップで「前回の記録」を表示
+    if step in ("start_time", "end_time", "chapter") and st.session_state.recent_records:
+        labels = ["前回", "2回前", "3回前"]
+        hint_lines = []
+        for i, rec in enumerate(st.session_state.recent_records):
+            if rec["date"]:
+                d = datetime.strptime(rec["date"], "%Y-%m-%d").date()
+                date_fmt = f"{rec['date']}（{WEEKDAY_JP[d.weekday()]}）"
+                hint_lines.append(
+                    f"📅 **{labels[i]}**: {date_fmt} {rec['start_time']}〜{rec['end_time']} / {rec['chapter']}"
+                )
+        if hint_lines:
+            with st.expander("📋 前回の記録を見る", expanded=True):
+                st.markdown("\n\n".join(hint_lines))
+
     user_input = st.chat_input("入力してください...")
     if user_input is not None:
         value = user_input.strip()
-        step = st.session_state.step
-
-        # 日付の空入力 → 今日
-        if step == "date" and not value:
-            value = datetime.now().strftime("%Y-%m-%d")
-
         st.session_state.data[step] = value
-        st.session_state.messages.append({"role": "user", "content": value or "（今日）"})
+        st.session_state.messages.append({"role": "user", "content": value})
 
-        # 次ステップへ
         next_steps = list(STEP_QUESTIONS.keys())
         current_idx = next_steps.index(step)
         if current_idx + 1 < len(next_steps):
@@ -151,15 +241,17 @@ elif st.session_state.step in STEP_QUESTIONS:
             st.session_state.messages.append({"role": "assistant", "content": STEP_QUESTIONS[next_step]})
             st.session_state.step = next_step
         else:
-            # 確認ステップへ
             d = st.session_state.data
             db = d["db_info"]
+            date_display = format_date_with_weekday(d["date"])
+            name = auto_generate_name(d["date"], db["material"])
             summary = (
                 f"以下の内容でNotionに登録します。よろしいですか？\n\n"
                 f"📖 **教材**: {db['material']}\n"
-                f"📅 **日付**: {d['date']}\n"
+                f"📝 **名前**: {name}\n"
+                f"📅 **日付**: {date_display}\n"
                 f"⏰ **時間**: {d['start_time']} ～ {d['end_time']}\n"
-                f"📝 **章**: {d['chapter']}\n"
+                f"📚 **章**: {d['chapter']}\n"
                 f"⭐ **重要ポイント**: {d['important']}\n"
                 f"❓ **疑問**: {d['questions']}\n"
                 f"💡 **気づき**: {d['insights']}"
@@ -170,15 +262,17 @@ elif st.session_state.step in STEP_QUESTIONS:
 
 # ── 確認ステップ ──────────────────────────────────────────────────────────────
 elif st.session_state.step == "confirm":
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("✅ 登録する", use_container_width=True):
             d = st.session_state.data
             db = d["db_info"]
+            name = auto_generate_name(d["date"], db["material"])
             details = {
-                "date": d["date"],
-                "start": f"{d['date']}T{d['start_time']}:00+09:00",
-                "end":   f"{d['date']}T{d['end_time']}:00+09:00",
+                "name":      name,
+                "date":      d["date"],
+                "start":     f"{d['date']}T{d['start_time']}:00+09:00",
+                "end":       f"{d['date']}T{d['end_time']}:00+09:00",
                 "chapter":   d["chapter"],
                 "important": d["important"],
                 "questions": d["questions"],
@@ -195,8 +289,16 @@ elif st.session_state.step == "confirm":
             st.session_state.step = "done"
             st.rerun()
     with col2:
+        if st.button("✏️ 修正する", use_container_width=True):
+            st.session_state.step = "material"
+            st.session_state.data = {}
+            st.session_state.recent_records = []
+            st.session_state.messages.append({"role": "user", "content": "修正する"})
+            st.session_state.messages.append({"role": "assistant", "content": "最初からやり直しましょう。教材を選んでください👇"})
+            st.rerun()
+    with col3:
         if st.button("❌ キャンセル", use_container_width=True):
             st.session_state.messages.append({"role": "user", "content": "キャンセル"})
-            st.session_state.messages.append({"role": "assistant", "content": "キャンセルしました。ページを再読み込みすると最初からやり直せます。"})
-            st.session_state.step = "done"
+            st.session_state.messages.append({"role": "assistant", "content": "キャンセルしました。"})
+            st.session_state.step = "finished"
             st.rerun()

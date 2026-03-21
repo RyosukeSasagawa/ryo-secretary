@@ -130,7 +130,9 @@ def register_to_notion(db_info: dict, details: dict) -> bool:
         )
         return True
     except Exception as e:
-        st.error(f"Notion登録エラー: {e}")
+        st.error(f"❌ 登録に失敗しました。エラー詳細: {str(e)}")
+        import traceback
+        st.code(traceback.format_exc())
         return False
 
 
@@ -280,8 +282,8 @@ elif st.session_state.step == "confirm":
             details = {
                 "name":      name,
                 "date":      d["date"],
-                "start":     f"{d['date']}T{d['start_time']}:00+09:00",
-                "end":       f"{d['date']}T{d['end_time']}:00+09:00",
+                "start":     f"{d['date']}T{d['start_time'].zfill(5)}:00+09:00",
+                "end":       f"{d['date']}T{d['end_time'].zfill(5)}:00+09:00",
                 "chapter":   d["chapter"],
                 "important": d["important"],
                 "questions": d["questions"],

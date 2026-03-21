@@ -1,10 +1,19 @@
 import os
+from pathlib import Path
 import streamlit as st
 from notion_client import Client
 from dotenv import load_dotenv
 from datetime import datetime, date
 
-load_dotenv()
+# .envファイルを絶対パスで読み込む
+env_path = Path(__file__).parent / ".env"
+load_dotenv(dotenv_path=env_path)
+
+# デバッグ用：トークンが読み込めているか確認
+if not os.getenv("NOTION_TOKEN"):
+    st.error("❌ NOTION_TOKENが読み込めていません。.envファイルを確認してください。")
+    st.code(f"探しているパス: {env_path}")
+    st.stop()
 
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 notion = Client(auth=NOTION_TOKEN)

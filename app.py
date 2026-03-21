@@ -258,12 +258,16 @@ elif st.session_state.step == "end_time":
     with col2:
         em = st.number_input("分", min_value=0, max_value=59, value=25, step=5, key="em")
     if st.button("終了時間を確定"):
-        value = f"{eh:02d}:{em:02d}"
-        st.session_state.data["end_time"] = value
-        st.session_state.messages.append({"role": "user", "content": value})
-        st.session_state.messages.append({"role": "assistant", "content": STEP_QUESTIONS["chapter"]})
-        st.session_state.step = "chapter"
-        st.rerun()
+        end_value = f"{eh:02d}:{em:02d}"
+        start_value = st.session_state.data.get("start_time", "00:00")
+        if end_value <= start_value:
+            st.error("❌ 終了時間は開始時間より後にしてください")
+        else:
+            st.session_state.data["end_time"] = end_value
+            st.session_state.messages.append({"role": "user", "content": end_value})
+            st.session_state.messages.append({"role": "assistant", "content": STEP_QUESTIONS["chapter"]})
+            st.session_state.step = "chapter"
+            st.rerun()
 
 # ── テキスト入力ステップ ──────────────────────────────────────────────────────
 elif st.session_state.step in STEP_QUESTIONS:

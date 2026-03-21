@@ -57,12 +57,15 @@ def auto_generate_name(date_str: str, material: str) -> str:
 def get_recent_records(database_id: str, n: int = 3) -> list:
     """指定DBの直近n件の記録を取得する"""
     try:
-        results = notion.databases.query(
-            database_id=database_id,
-            sorts=[{"timestamp": "created_time", "direction": "descending"}],
-            page_size=n,
-        ).get("results", [])
-
+        response = notion.request(
+            path=f"databases/{database_id}/query",
+            method="POST",
+            body={
+                "sorts": [{"timestamp": "created_time", "direction": "descending"}],
+                "page_size": n
+            }
+        )
+        results = response.get("results", [])
         records = []
         for page in results:
             props = page["properties"]
@@ -79,19 +82,25 @@ def get_recent_records(database_id: str, n: int = 3) -> list:
                     end_time = e[11:16]
             chapter_prop = props.get("章", {}).get("rich_text", [])
             chapter = chapter_prop[0]["text"]["content"] if chapter_prop else ""
-            if date_str:
-                records.append({"date": date_str, "start_time": start_time, "end_time": end_time, "chapter": chapter})
+            records.append({
+                "date": date_str,
+                "start_time": start_time,
+                "end_time": end_time,
+                "chapter": chapter
+            })
         return records
-    except Exception:
+    except Exception as e:
+        st.warning(f"前回の記録取得に失敗: {e}")
         return []
 
 
 def get_streak(database_id: str) -> int:
     """指定DBの連続学習日数を計算する"""
     try:
-        results = notion.databases.query(
-            database_id=database_id,
-            sorts=[{"property": "日付", "direction": "descending"}],
+        results = notion.request(
+            path=f"databases/{database_id}/query",
+            method="POST",
+            body={"sorts": [{"property": "日付", "direction": "descending"}]},
         ).get("results", [])
 
         dates = set()

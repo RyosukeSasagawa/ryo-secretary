@@ -39,10 +39,9 @@ Notion（学習記録を手入力）→ Python（毎朝3時自動実行）→ SQ
   → NotionのDBに自動登録 + SQL Serverにも保存
 
 次にやること:
-  1. Notionのテストデータ（2026-03-20 瞬間英作文）を削除する
-  2. secretary.pyをGitHubに公開する（ポートフォリオ化）
-  3. 実際の学習記録をsecretary.py経由で登録して運用開始
-  4. Claude CodeのAuto-updateエラーを修正
+  1. 実際の学習記録をsecretary.py経由で登録して運用開始
+  2. Claude CodeのAuto-updateエラーを修正
+  3. secretary.pyの起動をもっと簡単にする（シェルスクリプト化）
 
 ## 完了済みタスク
 - 2026-03-20: GASエラー修正（日付フォーマット・トークン管理）
@@ -50,6 +49,7 @@ Notion（学習記録を手入力）→ Python（毎朝3時自動実行）→ SQ
 - 2026-03-20: WSLフォルダ構成を整理（~/projects/配下に統一）
 - 2026-03-20: CLAUDE.md作成（AI引き継ぎ体制を確立）
 - 2026-03-20: AI秘書Phase 1完成（secretary.py動作確認済み）
+- 2026-03-21: GitHubにryo-secretaryを公開（ポートフォリオ化）
 
 ## このファイルの更新ルール
 - 作業完了のたびに「次にやること」を更新する

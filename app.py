@@ -59,7 +59,7 @@ def get_recent_records(database_id: str, n: int = 3) -> list:
     try:
         results = notion.databases.query(
             database_id=database_id,
-            sorts=[{"property": "日付", "direction": "descending"}],
+            sorts=[{"timestamp": "created_time", "direction": "descending"}],
             page_size=n,
         ).get("results", [])
 
@@ -220,12 +220,57 @@ elif st.session_state.step == "date":
         st.session_state.step = "start_time"
         st.rerun()
 
+# ── 開始時間（スピナー）─────────────────────────────────────────────────────
+elif st.session_state.step == "start_time":
+    if st.session_state.recent_records:
+        labels = ["前回", "2回前", "3回前"]
+        hint_lines = []
+        for i, rec in enumerate(st.session_state.recent_records):
+            if rec["date"]:
+                d = datetime.strptime(rec["date"], "%Y-%m-%d").date()
+                date_fmt = f"{rec['date']}（{WEEKDAY_JP[d.weekday()]}）"
+                hint_lines.append(
+                    f"📅 **{labels[i]}**: {date_fmt} {rec['start_time']}〜{rec['end_time']} / {rec['chapter']}"
+                )
+        if hint_lines:
+            with st.expander("📋 前回の記録を見る", expanded=True):
+                st.markdown("\n\n".join(hint_lines))
+    st.markdown("**開始時間を入力してください**")
+    col1, col2 = st.columns(2)
+    with col1:
+        sh = st.number_input("時", min_value=0, max_value=23, value=4, step=1, key="sh")
+    with col2:
+        sm = st.number_input("分", min_value=0, max_value=59, value=0, step=5, key="sm")
+    if st.button("開始時間を確定"):
+        value = f"{sh:02d}:{sm:02d}"
+        st.session_state.data["start_time"] = value
+        st.session_state.messages.append({"role": "user", "content": value})
+        st.session_state.messages.append({"role": "assistant", "content": STEP_QUESTIONS["end_time"]})
+        st.session_state.step = "end_time"
+        st.rerun()
+
+# ── 終了時間（スピナー）─────────────────────────────────────────────────────
+elif st.session_state.step == "end_time":
+    st.markdown("**終了時間を入力してください**")
+    col1, col2 = st.columns(2)
+    with col1:
+        eh = st.number_input("時", min_value=0, max_value=23, value=4, step=1, key="eh")
+    with col2:
+        em = st.number_input("分", min_value=0, max_value=59, value=25, step=5, key="em")
+    if st.button("終了時間を確定"):
+        value = f"{eh:02d}:{em:02d}"
+        st.session_state.data["end_time"] = value
+        st.session_state.messages.append({"role": "user", "content": value})
+        st.session_state.messages.append({"role": "assistant", "content": STEP_QUESTIONS["chapter"]})
+        st.session_state.step = "chapter"
+        st.rerun()
+
 # ── テキスト入力ステップ ──────────────────────────────────────────────────────
 elif st.session_state.step in STEP_QUESTIONS:
     step = st.session_state.step
 
-    # 開始時間・終了時間・章のステップで「前回の記録」を表示
-    if step in ("start_time", "end_time", "chapter") and st.session_state.recent_records:
+    # 章のステップで「前回の記録」を表示
+    if step == "chapter" and st.session_state.recent_records:
         labels = ["前回", "2回前", "3回前"]
         hint_lines = []
         for i, rec in enumerate(st.session_state.recent_records):

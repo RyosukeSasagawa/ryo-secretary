@@ -42,6 +42,25 @@ MATERIAL_OPTIONS = {f"{i+1}. [{db['subject']}] {db['material']}": i for i, db in
 
 WEEKDAY_JP = ["月", "火", "水", "木", "金", "土", "日"]
 
+STEP_QUESTIONS = {
+    "start_time": "開始時間を入力してください（例: 04:00）",
+    "end_time":   "終了時間を入力してください（例: 04:25）",
+    "chapter":    "章・範囲を入力してください（例: Chapter 3）",
+    "important":  "重要ポイントを入力してください",
+    "questions":  "疑問点を入力してください（なければ「なし」）",
+    "insights":   "気づき・実践を入力してください",
+}
+
+LABELS_3 = ["前回", "2回前", "3回前"]
+
+# テキストステップの各フィールドキー（recent_recordsのキーと対応）
+TEXT_STEP_FIELD = {
+    "chapter":   "chapter",
+    "important": "important",
+    "questions": "questions",
+    "insights":  "insights",
+}
+
 
 def format_date_with_weekday(date_str: str) -> str:
     """'2026-03-21' → '2026-03-21（土）'"""
@@ -82,11 +101,20 @@ def get_recent_records(database_id: str, n: int = 3) -> list:
                     end_time = e[11:16]
             chapter_prop = props.get("章", {}).get("rich_text", [])
             chapter = chapter_prop[0]["text"]["content"] if chapter_prop else ""
+            important_prop = props.get("重要ポイント", {}).get("rich_text", [])
+            important = important_prop[0]["text"]["content"] if important_prop else ""
+            questions_prop = props.get("疑問", {}).get("rich_text", [])
+            questions = questions_prop[0]["text"]["content"] if questions_prop else ""
+            insights_prop = props.get("気づき・実践", {}).get("rich_text", [])
+            insights = insights_prop[0]["text"]["content"] if insights_prop else ""
             records.append({
-                "date": date_str,
+                "date":      date_str,
                 "start_time": start_time,
-                "end_time": end_time,
-                "chapter": chapter
+                "end_time":   end_time,
+                "chapter":   chapter,
+                "important": important,
+                "questions": questions,
+                "insights":  insights,
             })
         return records
     except Exception as e:
@@ -145,6 +173,79 @@ def register_to_notion(db_info: dict, details: dict) -> bool:
         return False
 
 
+def advance_text_step(step: str, value: str):
+    """テキストステップを進める共通処理（ボタン・chat_input 共用）"""
+    st.session_state.data[step] = value
+    display = value if value else "（なし）"
+    st.session_state.messages.append({"role": "user", "content": display})
+
+    all_steps = list(STEP_QUESTIONS.keys())
+    current_idx = all_steps.index(step)
+    if current_idx + 1 < len(all_steps):
+        next_step = all_steps[current_idx + 1]
+        st.session_state.messages.append({"role": "assistant", "content": STEP_QUESTIONS[next_step]})
+        st.session_state.step = next_step
+    else:
+        d = st.session_state.data
+        db = d["db_info"]
+        date_display = format_date_with_weekday(d["date"])
+        name = auto_generate_name(d["date"], db["material"])
+        summary = (
+            f"以下の内容でNotionに登録します。よろしいですか？\n\n"
+            f"📖 **教材**: {db['material']}\n"
+            f"📝 **名前**: {name}\n"
+            f"📅 **日付**: {date_display}\n"
+            f"⏰ **時間**: {d['start_time']} ～ {d['end_time']}\n"
+            f"📚 **章**: {d['chapter']}\n"
+            f"⭐ **重要ポイント**: {d['important']}\n"
+            f"❓ **疑問**: {d['questions']}\n"
+            f"💡 **気づき**: {d['insights']}"
+        )
+        st.session_state.messages.append({"role": "assistant", "content": summary})
+        st.session_state.step = "confirm"
+    st.rerun()
+
+
+def show_past_time_buttons(field: str, next_step: str, btn_prefix: str):
+    """過去3回の時刻ボタンを横並びで表示し、押すと時刻を確定して次のステップへ"""
+    recent = st.session_state.recent_records
+    btns = [(LABELS_3[i], r[field]) for i, r in enumerate(recent) if r.get(field)]
+    if not btns:
+        return
+    st.markdown("📋 **過去の記録から選ぶ**")
+    cols = st.columns(len(btns))
+    for i, (label, t) in enumerate(btns):
+        with cols[i]:
+            if st.button(f"{label}: {t}", key=f"{btn_prefix}_{i}", use_container_width=True):
+                st.session_state.data[field] = t
+                st.session_state.messages.append({"role": "user", "content": t})
+                st.session_state.messages.append({"role": "assistant", "content": STEP_QUESTIONS[next_step]})
+                st.session_state.step = next_step
+                st.rerun()
+
+
+def show_past_text_buttons(step: str, field_key: str):
+    """過去3回のテキストボタン＋なしボタンを横並びで表示し、押すと次のステップへ"""
+    recent = st.session_state.recent_records
+    # 各レコードの値を（ラベル, 値）リストに（空の場合はスキップ）
+    btns = [(LABELS_3[i], r[field_key]) for i, r in enumerate(recent) if r.get(field_key)]
+    if not btns:
+        # 過去データなしでもなしボタンは表示
+        if st.button("なし（空白）", key=f"none_{step}", use_container_width=True):
+            advance_text_step(step, "")
+        return
+    st.markdown("📋 **過去の記録から選ぶ**")
+    cols = st.columns(len(btns) + 1)
+    for i, (label, val) in enumerate(btns):
+        truncated = val[:15] if len(val) > 15 else val
+        with cols[i]:
+            if st.button(f"{label}: {truncated}", key=f"past_{step}_{i}", use_container_width=True):
+                advance_text_step(step, val)
+    with cols[len(btns)]:
+        if st.button("なし（空白）", key=f"none_{step}", use_container_width=True):
+            advance_text_step(step, "")
+
+
 # ── セッション初期化 ──────────────────────────────────────────────────────────
 if "step" not in st.session_state:
     st.session_state.step = "material"
@@ -196,16 +297,6 @@ if st.session_state.step == "done":
             st.rerun()
     st.stop()
 
-# ── ステップ別の質問テキスト（date はウィジェット対応のため除外）───────────────
-STEP_QUESTIONS = {
-    "start_time": "開始時間を入力してください（例: 04:00）",
-    "end_time":   "終了時間を入力してください（例: 04:25）",
-    "chapter":    "章・範囲を入力してください（例: Chapter 3）",
-    "important":  "重要ポイントを入力してください",
-    "questions":  "疑問点を入力してください（なければ「なし」）",
-    "insights":   "気づき・実践を入力してください",
-}
-
 # ── 教材選択（selectbox）────────────────────────────────────────────────────
 if st.session_state.step == "material":
     selected_label = st.selectbox("教材を選択", list(MATERIAL_OPTIONS.keys()), label_visibility="collapsed")
@@ -231,19 +322,6 @@ elif st.session_state.step == "date":
 
 # ── 開始時間（スピナー）─────────────────────────────────────────────────────
 elif st.session_state.step == "start_time":
-    if st.session_state.recent_records:
-        labels = ["前回", "2回前", "3回前"]
-        hint_lines = []
-        for i, rec in enumerate(st.session_state.recent_records):
-            if rec["date"]:
-                d = datetime.strptime(rec["date"], "%Y-%m-%d").date()
-                date_fmt = f"{rec['date']}（{WEEKDAY_JP[d.weekday()]}）"
-                hint_lines.append(
-                    f"📅 **{labels[i]}**: {date_fmt} {rec['start_time']}〜{rec['end_time']} / {rec['chapter']}"
-                )
-        if hint_lines:
-            with st.expander("📋 前回の記録を見る", expanded=True):
-                st.markdown("\n\n".join(hint_lines))
     st.markdown("**開始時間を入力してください**")
     col1, col2 = st.columns(2)
     with col1:
@@ -257,6 +335,7 @@ elif st.session_state.step == "start_time":
         st.session_state.messages.append({"role": "assistant", "content": STEP_QUESTIONS["end_time"]})
         st.session_state.step = "end_time"
         st.rerun()
+    show_past_time_buttons("start_time", "end_time", "st_btn")
 
 # ── 終了時間（スピナー）─────────────────────────────────────────────────────
 elif st.session_state.step == "end_time":
@@ -277,57 +356,25 @@ elif st.session_state.step == "end_time":
             st.session_state.messages.append({"role": "assistant", "content": STEP_QUESTIONS["chapter"]})
             st.session_state.step = "chapter"
             st.rerun()
+    show_past_time_buttons("end_time", "chapter", "et_btn")
 
 # ── テキスト入力ステップ ──────────────────────────────────────────────────────
 elif st.session_state.step in STEP_QUESTIONS:
     step = st.session_state.step
+    field_key = TEXT_STEP_FIELD.get(step)
 
-    # 章のステップで「前回の記録」を表示
-    if step == "chapter" and st.session_state.recent_records:
-        labels = ["前回", "2回前", "3回前"]
-        hint_lines = []
-        for i, rec in enumerate(st.session_state.recent_records):
-            if rec["date"]:
-                d = datetime.strptime(rec["date"], "%Y-%m-%d").date()
-                date_fmt = f"{rec['date']}（{WEEKDAY_JP[d.weekday()]}）"
-                hint_lines.append(
-                    f"📅 **{labels[i]}**: {date_fmt} {rec['start_time']}〜{rec['end_time']} / {rec['chapter']}"
-                )
-        if hint_lines:
-            with st.expander("📋 前回の記録を見る", expanded=True):
-                st.markdown("\n\n".join(hint_lines))
+    # 過去記録ボタン＋なしボタン
+    if field_key and st.session_state.recent_records:
+        show_past_text_buttons(step, field_key)
+    elif field_key:
+        # 過去記録がない場合もなしボタンを表示
+        if st.button("なし（空白）", key=f"none_{step}"):
+            advance_text_step(step, "")
 
+    # 手動入力（chat_input）
     user_input = st.chat_input("入力してください...")
     if user_input is not None:
-        value = user_input.strip()
-        st.session_state.data[step] = value
-        st.session_state.messages.append({"role": "user", "content": value})
-
-        next_steps = list(STEP_QUESTIONS.keys())
-        current_idx = next_steps.index(step)
-        if current_idx + 1 < len(next_steps):
-            next_step = next_steps[current_idx + 1]
-            st.session_state.messages.append({"role": "assistant", "content": STEP_QUESTIONS[next_step]})
-            st.session_state.step = next_step
-        else:
-            d = st.session_state.data
-            db = d["db_info"]
-            date_display = format_date_with_weekday(d["date"])
-            name = auto_generate_name(d["date"], db["material"])
-            summary = (
-                f"以下の内容でNotionに登録します。よろしいですか？\n\n"
-                f"📖 **教材**: {db['material']}\n"
-                f"📝 **名前**: {name}\n"
-                f"📅 **日付**: {date_display}\n"
-                f"⏰ **時間**: {d['start_time']} ～ {d['end_time']}\n"
-                f"📚 **章**: {d['chapter']}\n"
-                f"⭐ **重要ポイント**: {d['important']}\n"
-                f"❓ **疑問**: {d['questions']}\n"
-                f"💡 **気づき**: {d['insights']}"
-            )
-            st.session_state.messages.append({"role": "assistant", "content": summary})
-            st.session_state.step = "confirm"
-        st.rerun()
+        advance_text_step(step, user_input.strip())
 
 # ── 確認ステップ ──────────────────────────────────────────────────────────────
 elif st.session_state.step == "confirm":

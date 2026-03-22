@@ -39,10 +39,9 @@ Notion（学習記録を手入力）→ Python（毎朝3時自動実行）→ SQ
   → NotionのDBに自動登録 + SQL Serverにも保存
 
 次にやること:
-  1. Streamlitを再起動してサジェスト機能の動作確認
-  2. app.pyを運用開始（secretary.pyの代わりにapp.pyで学習記録をつける）
-  3. Claude CodeのAuto-updateエラーを修正
-  4. notion-sync_v4.pyも notion-client==2.3.0 対応か確認
+  1. app.pyで実際の毎日の学習記録を運用開始
+  2. notion-sync_v4.pyも notion-client==2.3.0 対応か確認
+  3. app.pyのデスクトップショートカットを作成（起動を楽にする）
 
 ## 完了済みタスク
 - 2026-03-20: GASエラー修正（日付フォーマット・トークン管理）
@@ -54,6 +53,8 @@ Notion（学習記録を手入力）→ Python（毎朝3時自動実行）→ SQ
 - 2026-03-21: Streamlit WebアプリUI（app.py）作成・改善
 - 2026-03-21: 時刻スピナー・バリデーション・連続入力・終了ボタン実装
 - 2026-03-21: notion-client v2.3.0にダウングレード（v3.0.0でquery廃止のため）
+- 2026-03-22: Auto-updateエラー修正（npm --prefix ~/.npm-global）
+- 2026-03-22: 全項目に過去記録ボタン+なしボタン追加（サジェスト機能完成）
 
 ## このファイルの更新ルール
 - 作業完了のたびに「次にやること」を更新する

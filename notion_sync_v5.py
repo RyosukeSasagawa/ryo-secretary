@@ -31,9 +31,8 @@ from plotly.subplots import make_subplots
 # ---------------------------------------------------------------------------
 load_dotenv()
 
-NOTION_TOKEN      = os.getenv("NOTION_TOKEN")
-NOTION_PAGE_ID    = os.getenv("NOTION_PAGE_ID")   # グラフを埋め込むNotionページID
-NOTION_DBS_IDS    = os.getenv("NOTION_DBS_IDS", "")  # カンマ区切りのDB IDリスト
+NOTION_TOKEN   = os.getenv("NOTION_TOKEN")
+NOTION_PAGE_ID = os.getenv("NOTION_PAGE_ID")   # グラフを埋め込むNotionページID
 
 AWS_ACCESS_KEY_ID     = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
@@ -54,13 +53,30 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# DBリスト
-# v4.pyと同じリストを .env の NOTION_DBS_IDS に設定してください（カンマ区切り）
-# 例: NOTION_DBS_IDS=abc123def456,ghi789jkl012
+# DBリスト（v4.pyと同じ定義）
+# subject: 科目分類、material: 教材名（グラフの凡例に使用）
 # ---------------------------------------------------------------------------
-NOTION_DBS: list[str] = [db_id.strip() for db_id in NOTION_DBS_IDS.split(",") if db_id.strip()]
+NOTION_DBS = [
+    {"database_id": "2ca223f671538122a535e7f41d900af6", "subject": "語学・英語",       "material": "瞬間英作文"},
+    {"database_id": "2ca223f671538175b4b3d5c2d380071e", "subject": "語学・英語",       "material": "文法問題 でる1000問"},
+    {"database_id": "2ca223f6715381608585ca15a5e3b62e", "subject": "語学・英語",       "material": "金の読解"},
+    {"database_id": "2ca223f6715381a9866bee5796934ba2", "subject": "語学・英語",       "material": "公式TOEIC 問題集8"},
+    {"database_id": "2ca223f671538102ae62d797b83308a1", "subject": "語学・英語",       "material": "金のパッケージ"},
+    {"database_id": "2ca223f6715381e8b814df983ca2b559", "subject": "語学・英語",       "material": "AI英会話（ChatGPT）"},
+    {"database_id": "2ca223f6715381f3b3f5e25f66e4d97e", "subject": "語学・英語",       "material": "オリジナル瞬間英作文"},
+    {"database_id": "2ca223f6715381898281c07c90e44853", "subject": "AI・機械学習",     "material": "大規模言語モデル基礎"},
+    {"database_id": "2ca223f6715381128502ff3f3edc123e", "subject": "AI・機械学習",     "material": "大規模言語モデル応用"},
+    {"database_id": "2ca223f67153817ea892cf6eae459a83", "subject": "AI・機械学習",     "material": "AI経営寄付講座"},
+    {"database_id": "2ca223f671538110ac94c84866a7223f", "subject": "AI・機械学習",     "material": "実践へのBridge講座"},
+    {"database_id": "2ca223f6715381ffbb3ec25d59c18ad1", "subject": "AI・機械学習",     "material": "ゼロから作るDeep Learning❷"},
+    {"database_id": "2ca223f671538165bd9df2ac4e378a9a", "subject": "AI・機械学習",     "material": "Kaggle"},
+    {"database_id": "2ca223f671538143b4aee50c9d6f3ab2", "subject": "統計・データ分析", "material": "統計検定2級対策講座"},
+    {"database_id": "2ca223f6715381718bfdc67a838c46fc", "subject": "統計・データ分析", "material": "統計学が最強の学問である"},
+    {"database_id": "2d3223f6715381b4b889d82c9dfecc13", "subject": "ビジネス",         "material": "1億人のための統計解析"},
+    {"database_id": "300223f6715381259c2be6ef25fd2a10", "subject": "AI・機械学習",     "material": "JOAI Competition 2026"},
+]
 
-# Notionプロパティ名マッピング（v4.pyの設定に合わせて変更してください）
+# Notionプロパティ名マッピング
 PROPERTY_MAP = {
     "study_date":   "日付",
     "chapter":      "章",
@@ -201,10 +217,19 @@ def fetch_notion_data(notion: Client, db_id: str, db_name: str = "") -> list[dic
                 except ValueError:
                     pass
 
-            study_minutes_raw = props.get(pmap["study_minutes"])
+            # 「学習時間」はdate型（開始〜終了時刻）なので差分を分に換算する
             study_minutes = None
-            if study_minutes_raw and study_minutes_raw.get("type") == "number":
-                study_minutes = study_minutes_raw.get("number")
+            time_prop = props.get("学習時間", {}).get("date")
+            if time_prop:
+                start = time_prop.get("start")
+                end = time_prop.get("end")
+                if start and end:
+                    try:
+                        s = datetime.fromisoformat(start)
+                        e = datetime.fromisoformat(end)
+                        study_minutes = (e - s).total_seconds() / 60
+                    except (ValueError, TypeError):
+                        study_minutes = None
 
             records.append({
                 "notion_page_id": page["id"],
@@ -403,7 +428,7 @@ def main() -> None:
         logger.error("NOTION_TOKEN が設定されていません（.envを確認）")
         return
     if not NOTION_DBS:
-        logger.error("NOTION_DBS_IDS が設定されていません（.envを確認）")
+        logger.error("NOTION_DBS が空です（notion_sync_v5.py内のリストを確認）")
         return
     if not SQL_SERVER:
         logger.error("SQL_SERVER が設定されていません（.envを確認）")
@@ -414,18 +439,14 @@ def main() -> None:
     # --- Step 1: Notionからデータ取得 ---
     logger.info("[Step 1] Notionからデータを取得中...")
     all_records: list[dict] = []
-    for db_id in NOTION_DBS:
+    for db in NOTION_DBS:
+        db_id = db["database_id"]
+        material = db["material"]
         try:
-            # DB名はNotion APIで取得
-            db_info = notion.databases.retrieve(database_id=db_id)
-            db_name = ""
-            title_items = db_info.get("title", [])
-            if title_items:
-                db_name = title_items[0].get("plain_text", db_id)
-            records = fetch_notion_data(notion, db_id, db_name)
+            records = fetch_notion_data(notion, db_id, material)
             all_records.extend(records)
         except Exception as e:
-            logger.error(f"  DB取得エラー ({db_id}): {e}")
+            logger.error(f"  DB取得エラー ({material}): {e}")
 
     logger.info(f"  合計取得: {len(all_records)} 件")
 

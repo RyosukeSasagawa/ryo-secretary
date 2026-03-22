@@ -3,3 +3,5 @@ python-dotenv
 pyodbc
 pandas
 streamlit
+plotly
+boto3

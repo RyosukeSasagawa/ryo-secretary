@@ -91,14 +91,34 @@ PROPERTY_MAP = {
 # ---------------------------------------------------------------------------
 
 def get_db_connection():
-    """SQL Serverへの接続を返す。"""
+    """SQL Serverへの接続を返す。WSLからはSQL Server認証を使用。"""
     import pyodbc
-    conn_str = (
-        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
-        f"SERVER={SQL_SERVER};"
-        f"DATABASE={SQL_DATABASE};"
-        "Trusted_Connection=yes;"
-    )
+
+    sql_user = os.getenv("SQL_USER")
+    sql_password = os.getenv("SQL_PASSWORD")
+    raw = os.getenv("SQL_SERVER", "")
+    # ホスト名をIPに変換し、ポート番号をカンマ形式で指定
+    sql_server = raw.replace("SASAGAWAS_PC\\SQLEXPRESS", "172.26.80.1,1433").replace("SASAGAWAS_PC", "172.26.80.1")
+
+    if sql_user and sql_password:
+        # SQL Server認証（WSLからの接続用）
+        conn_str = (
+            f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+            f"SERVER={sql_server};"
+            f"DATABASE={SQL_DATABASE};"
+            f"UID={sql_user};"
+            f"PWD={sql_password};"
+            "TrustServerCertificate=yes;"
+        )
+    else:
+        # Windows認証（Windows上で直接実行する場合）
+        conn_str = (
+            f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+            f"SERVER={SQL_SERVER};"
+            f"DATABASE={SQL_DATABASE};"
+            "Trusted_Connection=yes;"
+            "TrustServerCertificate=yes;"
+        )
     return pyodbc.connect(conn_str)
 
 
@@ -138,12 +158,12 @@ def upsert_record(cursor, record: dict) -> None:
     1件のレコードをUPSERTする。
     notion_page_id が一致するレコードがあれば UPDATE、なければ INSERT。
     SQL Server の MERGE 構文を使用。
+    pyodbc はパラメータに ? を使い、値をタプルで渡す。
     """
     cursor.execute("""
         MERGE INTO StudyNotes AS target
         USING (VALUES (
-            :notion_page_id, :db_name, :study_date, :chapter,
-            :key_points, :questions, :insights, :study_minutes
+            ?, ?, ?, ?, ?, ?, ?, ?
         )) AS source (
             notion_page_id, db_name, study_date, chapter,
             key_points, questions, insights, study_minutes
@@ -165,7 +185,16 @@ def upsert_record(cursor, record: dict) -> None:
             VALUES (source.notion_page_id, source.db_name, source.study_date,
                     source.chapter, source.key_points, source.questions,
                     source.insights, source.study_minutes);
-    """, record)
+    """, (
+        record["notion_page_id"],
+        record["db_name"],
+        record["study_date"],
+        record["chapter"],
+        record["key_points"],
+        record["questions"],
+        record["insights"],
+        record["study_minutes"],
+    ))
 
 
 # ---------------------------------------------------------------------------

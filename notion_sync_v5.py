@@ -18,6 +18,7 @@ import os
 import logging
 from datetime import datetime
 
+import numpy as np
 import boto3
 import pandas as pd
 import plotly.graph_objects as go
@@ -293,91 +294,415 @@ PLOTLY_FONT = dict(
 
 def create_study_graphs(df: pd.DataFrame) -> str:
     """
-    学習データからPlotlyのインタラクティブHTMLを生成して文字列で返す。
-
-    グラフ構成（Phase 1）:
-      - 上段: 日別学習時間の棒グラフ（教材ごとに色分け）
-      - 下段: 累積学習時間の折れ線グラフ
+    学習データから9種類のグラフをタブ切り替えで表示するHTMLダッシュボードを生成して返す。
+    戻り値は <!DOCTYPE html> から始まる完全なHTML文字列。
     """
     if df.empty:
         logger.warning("データが空のためグラフをスキップします")
-        return "<html><body><p>データがありません</p></body></html>"
+        return "<!DOCTYPE html><html><body><p>データがありません</p></body></html>"
 
     df = df.copy()
     df["study_date"] = pd.to_datetime(df["study_date"])
     df = df.dropna(subset=["study_date", "study_minutes"])
     df = df.sort_values("study_date")
 
-    # 日別・教材別の集計
-    daily = (
-        df.groupby(["study_date", "db_name"])["study_minutes"]
-        .sum()
-        .reset_index()
+    # subject列を追加（NOTION_DBSのmaterial→subject対応）
+    subject_map = {db["material"]: db["subject"] for db in NOTION_DBS}
+    df["subject"] = df["db_name"].map(subject_map).fillna("その他")
+
+    CATEGORY_ORDER = ["語学・英語", "AI・機械学習", "統計・データ分析", "ビジネス", "その他"]
+    CATEGORY_COLORS = {
+        "語学・英語":     "#4C9BE8",
+        "AI・機械学習":   "#E85C4C",
+        "統計・データ分析": "#52B788",
+        "ビジネス":       "#F4A261",
+        "その他":         "#ADB5BD",
+    }
+    COMMON_LAYOUT = dict(
+        font=PLOTLY_FONT,
+        plot_bgcolor="#FAFAFA",
+        paper_bgcolor="#FFFFFF",
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(l=60, r=30, t=60, b=40),
+        height=480,
     )
 
-    # 累積（全教材合算）
+    tab_names = [
+        "① 日別学習時間",
+        "② 週別集計",
+        "③ 月別集計",
+        "④ 累積学習時間",
+        "⑤ 30日ヒートマップ",
+        "⑥ 教材別累積",
+        "⑦ カテゴリ別円グラフ",
+        "⑧ 曜日別平均",
+        "⑨ 週別カテゴリ推移",
+    ]
+    figs = []
+
+    # ------------------------------------------------------------------
+    # Graph 1: 日別学習時間（教材別積み上げ棒グラフ）
+    # ------------------------------------------------------------------
+    daily = df.groupby(["study_date", "db_name"])["study_minutes"].sum().reset_index()
+    fig1 = go.Figure()
+    for db_name in sorted(daily["db_name"].unique()):
+        subset = daily[daily["db_name"] == db_name]
+        fig1.add_trace(go.Bar(
+            x=subset["study_date"],
+            y=subset["study_minutes"],
+            name=db_name,
+            hovertemplate="%{x|%Y-%m-%d}<br>%{y:.0f} 分<extra>" + db_name + "</extra>",
+        ))
+    fig1.update_layout(
+        title="日別学習時間（教材別積み上げ）",
+        barmode="stack",
+        yaxis_title="学習時間（分）",
+        **COMMON_LAYOUT,
+    )
+    figs.append(fig1)
+
+    # ------------------------------------------------------------------
+    # Graph 2: 週別集計棒グラフ（カテゴリ別積み上げ）
+    # ------------------------------------------------------------------
+    df["week"] = df["study_date"].dt.to_period("W").dt.start_time
+    weekly = df.groupby(["week", "subject"])["study_minutes"].sum().reset_index()
+    fig2 = go.Figure()
+    for subj in CATEGORY_ORDER:
+        subset = weekly[weekly["subject"] == subj]
+        if subset.empty:
+            continue
+        fig2.add_trace(go.Bar(
+            x=subset["week"],
+            y=subset["study_minutes"],
+            name=subj,
+            marker_color=CATEGORY_COLORS[subj],
+            hovertemplate="%{x|%Y-%m-%d}週<br>%{y:.0f} 分<extra>" + subj + "</extra>",
+        ))
+    fig2.update_layout(
+        title="週別集計（カテゴリ別積み上げ）",
+        barmode="stack",
+        yaxis_title="学習時間（分）",
+        **COMMON_LAYOUT,
+    )
+    figs.append(fig2)
+
+    # ------------------------------------------------------------------
+    # Graph 3: 月別集計棒グラフ（カテゴリ別積み上げ）
+    # ------------------------------------------------------------------
+    df["month"] = df["study_date"].dt.to_period("M").dt.start_time
+    monthly = df.groupby(["month", "subject"])["study_minutes"].sum().reset_index()
+    fig3 = go.Figure()
+    for subj in CATEGORY_ORDER:
+        subset = monthly[monthly["subject"] == subj]
+        if subset.empty:
+            continue
+        fig3.add_trace(go.Bar(
+            x=subset["month"],
+            y=subset["study_minutes"],
+            name=subj,
+            marker_color=CATEGORY_COLORS[subj],
+            hovertemplate="%{x|%Y-%m}月<br>%{y:.0f} 分<extra>" + subj + "</extra>",
+        ))
+    fig3.update_layout(
+        title="月別集計（カテゴリ別積み上げ）",
+        barmode="stack",
+        yaxis_title="学習時間（分）",
+        **COMMON_LAYOUT,
+    )
+    figs.append(fig3)
+
+    # ------------------------------------------------------------------
+    # Graph 4: 累積学習時間折れ線グラフ
+    # ------------------------------------------------------------------
     cumulative = (
         df.groupby("study_date")["study_minutes"]
         .sum()
         .cumsum()
         .reset_index()
-        .rename(columns={"study_minutes": "cumulative_minutes"})
     )
-
-    fig = make_subplots(
-        rows=2, cols=1,
-        subplot_titles=("日別学習時間（教材別）", "累積学習時間"),
-        shared_xaxes=True,
-        vertical_spacing=0.12,
-        row_heights=[0.6, 0.4],
+    cumulative["cumulative_hours"] = cumulative["study_minutes"] / 60
+    fig4 = go.Figure()
+    fig4.add_trace(go.Scatter(
+        x=cumulative["study_date"],
+        y=cumulative["cumulative_hours"],
+        mode="lines+markers",
+        name="累積学習時間",
+        line=dict(color="#2196F3", width=2),
+        hovertemplate="%{x|%Y-%m-%d}<br>累積: %{y:.1f} 時間<extra></extra>",
+    ))
+    fig4.update_layout(
+        title="累積学習時間",
+        yaxis_title="累積時間（時間）",
+        **COMMON_LAYOUT,
     )
+    figs.append(fig4)
 
-    # 上段: 棒グラフ（教材ごとに色分け）
-    for db_name in daily["db_name"].unique():
-        subset = daily[daily["db_name"] == db_name]
-        fig.add_trace(
-            go.Bar(
-                x=subset["study_date"],
-                y=subset["study_minutes"],
-                name=db_name,
-                hovertemplate="%{x|%Y-%m-%d}<br>%{y:.0f} 分<extra>" + db_name + "</extra>",
-            ),
-            row=1, col=1,
-        )
+    # ------------------------------------------------------------------
+    # Graph 5: 直近30日ヒートマップ（GitHub草スタイル、緑のカラースケール）
+    # ------------------------------------------------------------------
+    today = pd.Timestamp.now().normalize()
+    start_30 = today - pd.Timedelta(days=29)
+    daily_30 = df[df["study_date"] >= start_30].groupby("study_date")["study_minutes"].sum()
+    date_range_30 = pd.date_range(start=start_30, end=today)
+    daily_full = daily_30.reindex(date_range_30, fill_value=0)
 
-    # 下段: 累積折れ線グラフ
-    fig.add_trace(
-        go.Scatter(
-            x=cumulative["study_date"],
-            y=cumulative["cumulative_minutes"],
-            mode="lines+markers",
-            name="累積",
-            line=dict(color="#2196F3", width=2),
-            hovertemplate="%{x|%Y-%m-%d}<br>累積: %{y:.0f} 分<extra></extra>",
-        ),
-        row=2, col=1,
-    )
+    weekday_labels = ["月", "火", "水", "木", "金", "土", "日"]
+    start_wd = date_range_30[0].weekday()  # 最初の日の曜日（0=月）
+    n_weeks = (len(date_range_30) - 1 + start_wd) // 7 + 1
 
-    fig.update_layout(
-        title=dict(
-            text="学習記録ダッシュボード",
-            font=dict(size=18),
-        ),
+    z_heat = np.full((7, n_weeks), np.nan)
+    text_heat = [[""] * n_weeks for _ in range(7)]
+
+    for i, (date, minutes) in enumerate(zip(date_range_30, daily_full.values)):
+        col = (i + start_wd) // 7
+        row = date.weekday()
+        z_heat[row][col] = float(minutes)
+        text_heat[row][col] = f"{date.strftime('%m/%d')}<br>{minutes:.0f}分"
+
+    # 各週の月曜日をX軸ラベルに使用
+    week_labels = []
+    for col in range(n_weeks):
+        for i, date in enumerate(date_range_30):
+            if (i + start_wd) // 7 == col:
+                monday = date - pd.Timedelta(days=date.weekday())
+                week_labels.append(monday.strftime("%m/%d"))
+                break
+
+    fig5 = go.Figure(data=go.Heatmap(
+        z=z_heat,
+        x=week_labels,
+        y=weekday_labels,
+        colorscale=[
+            [0.0,   "#ebedf0"],
+            [0.001, "#c6e48b"],
+            [0.3,   "#40c463"],
+            [0.6,   "#30a14e"],
+            [1.0,   "#216e39"],
+        ],
+        zmin=0,
+        text=text_heat,
+        hovertemplate="%{text}<extra></extra>",
+        showscale=True,
+        colorbar=dict(title="分"),
+    ))
+    fig5.update_layout(
+        title="直近30日の学習ヒートマップ（GitHub草スタイル）",
+        yaxis=dict(autorange="reversed"),
         font=PLOTLY_FONT,
-        barmode="stack",
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        plot_bgcolor="#FAFAFA",
         paper_bgcolor="#FFFFFF",
-        height=700,
-        margin=dict(l=60, r=30, t=80, b=40),
+        plot_bgcolor="#FAFAFA",
+        margin=dict(l=60, r=30, t=60, b=40),
+        height=320,
     )
+    figs.append(fig5)
 
-    fig.update_yaxes(title_text="学習時間（分）", row=1, col=1)
-    fig.update_yaxes(title_text="累積時間（分）", row=2, col=1)
+    # ------------------------------------------------------------------
+    # Graph 6: 教材別累積時間横棒グラフ（時間単位、昇順ソート）
+    # ------------------------------------------------------------------
+    material_total = (
+        df.groupby("db_name")["study_minutes"]
+        .sum()
+        .reset_index()
+    )
+    material_total["study_hours"] = material_total["study_minutes"] / 60
+    material_total = material_total.sort_values("study_hours", ascending=True)
+    fig6 = go.Figure()
+    fig6.add_trace(go.Bar(
+        x=material_total["study_hours"],
+        y=material_total["db_name"],
+        orientation="h",
+        marker_color="#4C9BE8",
+        hovertemplate="%{y}<br>%{x:.1f} 時間<extra></extra>",
+    ))
+    fig6.update_layout(
+        title="教材別累積学習時間",
+        xaxis_title="累積時間（時間）",
+        font=PLOTLY_FONT,
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FAFAFA",
+        margin=dict(l=200, r=30, t=60, b=40),
+        height=500,
+        hovermode="y unified",
+    )
+    figs.append(fig6)
 
-    # full_html=Trueで単独のHTMLとして出力（Notionへの埋め込みに使用）
-    return fig.to_html(full_html=True, include_plotlyjs="cdn")
+    # ------------------------------------------------------------------
+    # Graph 7: カテゴリ別円グラフ（ドーナツ型、hole=0.4）
+    # ------------------------------------------------------------------
+    category_total = df.groupby("subject")["study_minutes"].sum().reset_index()
+    fig7 = go.Figure()
+    fig7.add_trace(go.Pie(
+        labels=category_total["subject"],
+        values=category_total["study_minutes"],
+        hole=0.4,
+        marker_colors=[CATEGORY_COLORS.get(s, "#ADB5BD") for s in category_total["subject"]],
+        hovertemplate="%{label}<br>%{value:.0f} 分 (%{percent})<extra></extra>",
+    ))
+    fig7.update_layout(
+        title="カテゴリ別学習時間（ドーナツグラフ）",
+        font=PLOTLY_FONT,
+        paper_bgcolor="#FFFFFF",
+        margin=dict(l=30, r=30, t=60, b=40),
+        height=480,
+    )
+    figs.append(fig7)
+
+    # ------------------------------------------------------------------
+    # Graph 8: 曜日別平均学習時間棒グラフ（土日は赤、平日は青）
+    # ------------------------------------------------------------------
+    WEEKDAY_LABELS = ["月", "火", "水", "木", "金", "土", "日"]
+    df["weekday_num"] = df["study_date"].dt.weekday  # 0=月, 6=日
+    # 日付単位で合計 → 曜日で平均
+    daily_per_day = df.groupby(["study_date", "weekday_num"])["study_minutes"].sum().reset_index()
+    weekday_avg_raw = daily_per_day.groupby("weekday_num")["study_minutes"].mean().reset_index()
+    weekday_avg = (
+        pd.DataFrame({"weekday_num": range(7)})
+        .merge(weekday_avg_raw, on="weekday_num", how="left")
+        .fillna(0)
+    )
+    colors_wd = ["#E63946" if d >= 5 else "#4C9BE8" for d in weekday_avg["weekday_num"]]
+    fig8 = go.Figure()
+    fig8.add_trace(go.Bar(
+        x=[WEEKDAY_LABELS[int(d)] for d in weekday_avg["weekday_num"]],
+        y=weekday_avg["study_minutes"],
+        marker_color=colors_wd,
+        hovertemplate="%{x}<br>平均: %{y:.1f} 分<extra></extra>",
+    ))
+    fig8.update_layout(
+        title="曜日別平均学習時間（平日=青、土日=赤）",
+        yaxis_title="平均学習時間（分）",
+        font=PLOTLY_FONT,
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FAFAFA",
+        margin=dict(l=60, r=30, t=60, b=40),
+        height=400,
+        hovermode="x",
+    )
+    figs.append(fig8)
+
+    # ------------------------------------------------------------------
+    # Graph 9: 直近3ヶ月の週別カテゴリ推移（折れ線）
+    # ------------------------------------------------------------------
+    three_months_ago = today - pd.DateOffset(months=3)
+    df_3m = df[df["study_date"] >= three_months_ago].copy()
+    df_3m["week"] = df_3m["study_date"].dt.to_period("W").dt.start_time
+    weekly_cat = df_3m.groupby(["week", "subject"])["study_minutes"].sum().reset_index()
+    fig9 = go.Figure()
+    for subj in CATEGORY_ORDER:
+        subset = weekly_cat[weekly_cat["subject"] == subj]
+        if subset.empty:
+            continue
+        fig9.add_trace(go.Scatter(
+            x=subset["week"],
+            y=subset["study_minutes"],
+            mode="lines+markers",
+            name=subj,
+            line=dict(color=CATEGORY_COLORS[subj], width=2),
+            hovertemplate="%{x|%Y-%m-%d}週<br>%{y:.0f} 分<extra>" + subj + "</extra>",
+        ))
+    fig9.update_layout(
+        title="直近3ヶ月の週別カテゴリ推移",
+        yaxis_title="学習時間（分）",
+        **COMMON_LAYOUT,
+    )
+    figs.append(fig9)
+
+    # ------------------------------------------------------------------
+    # タブHTMLの組み立て
+    # ------------------------------------------------------------------
+    # plotly.jsはCDNから1回だけ読み込み、各グラフはdivのみ出力
+    div_list = [fig.to_html(full_html=False, include_plotlyjs=False) for fig in figs]
+
+    tab_buttons_html = "\n".join(
+        f'    <button class="tab-btn{"  active" if i == 0 else ""}" '
+        f'onclick="showTab({i})" id="tab-btn-{i}">{name}</button>'
+        for i, name in enumerate(tab_names)
+    )
+    tab_contents_html = "\n".join(
+        f'  <div id="tab-content-{i}" class="tab-content" '
+        f'style="display:{"block" if i == 0 else "none"}">\n{div}\n  </div>'
+        for i, div in enumerate(div_list)
+    )
+    n_tabs = len(tab_names)
+
+    return f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>学習記録ダッシュボード</title>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+  <style>
+    body {{
+      font-family: 'Noto Sans JP', 'Hiragino Sans', 'Meiryo', sans-serif;
+      margin: 0;
+      padding: 16px;
+      background: #f5f5f5;
+      color: #333;
+    }}
+    h1 {{
+      font-size: 1.4em;
+      margin: 0 0 14px;
+      color: #222;
+    }}
+    .tab-bar {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin-bottom: 14px;
+    }}
+    .tab-btn {{
+      padding: 6px 12px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      background: #fff;
+      cursor: pointer;
+      font-size: 0.83em;
+      color: #555;
+      transition: background 0.15s;
+    }}
+    .tab-btn:hover {{
+      background: #e8f0fe;
+    }}
+    .tab-btn.active {{
+      background: #1a73e8;
+      color: #fff;
+      border-color: #1a73e8;
+      font-weight: bold;
+    }}
+    .tab-content {{
+      background: #fff;
+      border-radius: 6px;
+      padding: 8px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+    }}
+  </style>
+</head>
+<body>
+  <h1>学習記録ダッシュボード</h1>
+  <div class="tab-bar">
+{tab_buttons_html}
+  </div>
+{tab_contents_html}
+  <script>
+    function showTab(idx) {{
+      for (var i = 0; i < {n_tabs}; i++) {{
+        var content = document.getElementById('tab-content-' + i);
+        var btn = document.getElementById('tab-btn-' + i);
+        var isActive = (i === idx);
+        content.style.display = isActive ? 'block' : 'none';
+        btn.classList.toggle('active', isActive);
+        if (isActive) {{
+          content.querySelectorAll('.plotly-graph-div').forEach(function(div) {{
+            Plotly.relayout(div, {{autosize: true}});
+          }});
+        }}
+      }}
+    }}
+  </script>
+</body>
+</html>"""
 
 
 # ---------------------------------------------------------------------------

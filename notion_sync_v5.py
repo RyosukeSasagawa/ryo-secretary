@@ -5,13 +5,11 @@ Notionの学習記録DBからデータを取得し、SQL Serverに保存、
 Plotlyでインタラクティブグラフを生成してAWS S3にアップロード、
 NotionページにEmbedブロックとして表示する。
 
-Version: 5.0.0
-改善点（v4.pyからの変更）:
-  - APIキーを.env化（セキュリティ強化）
-  - WSL対応（フォント依存をPlotlyに委譲）
-  - DROP→CREATE廃止、差分UPSERT方式に変更
-  - matplotlib/seabornをPlotlyに置き換え
-  - HTML形式でS3にアップロード
+Version: 5.1.0
+改善点（v5.0.0からの変更）:
+  - NOTION_DBSハードコード廃止
+  - 教材管理DBを起動時に自動スキャン（fetch_notion_dbs関数）
+  - 新教材追加時にコード修正不要
 """
 
 import os
@@ -32,8 +30,9 @@ from plotly.subplots import make_subplots
 # ---------------------------------------------------------------------------
 load_dotenv()
 
-NOTION_TOKEN   = os.getenv("NOTION_TOKEN")
-NOTION_PAGE_ID = os.getenv("NOTION_PAGE_ID")   # グラフを埋め込むNotionページID
+NOTION_TOKEN      = os.getenv("NOTION_TOKEN")
+NOTION_PAGE_ID    = os.getenv("NOTION_PAGE_ID")    # グラフを埋め込むNotionページID
+NOTION_MASTER_DB_ID = os.getenv("NOTION_MASTER_DB_ID")  # 教材管理DB（自動スキャン用）
 
 AWS_ACCESS_KEY_ID     = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
@@ -53,29 +52,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# DBリスト（v4.pyと同じ定義）
-# subject: 科目分類、material: 教材名（グラフの凡例に使用）
-# ---------------------------------------------------------------------------
-NOTION_DBS = [
-    {"database_id": "2ca223f671538122a535e7f41d900af6", "subject": "語学・英語",       "material": "瞬間英作文"},
-    {"database_id": "2ca223f671538175b4b3d5c2d380071e", "subject": "語学・英語",       "material": "文法問題 でる1000問"},
-    {"database_id": "2ca223f6715381608585ca15a5e3b62e", "subject": "語学・英語",       "material": "金の読解"},
-    {"database_id": "2ca223f6715381a9866bee5796934ba2", "subject": "語学・英語",       "material": "公式TOEIC 問題集8"},
-    {"database_id": "2ca223f671538102ae62d797b83308a1", "subject": "語学・英語",       "material": "金のパッケージ"},
-    {"database_id": "2ca223f6715381e8b814df983ca2b559", "subject": "語学・英語",       "material": "AI英会話（ChatGPT）"},
-    {"database_id": "2ca223f6715381f3b3f5e25f66e4d97e", "subject": "語学・英語",       "material": "オリジナル瞬間英作文"},
-    {"database_id": "2ca223f6715381898281c07c90e44853", "subject": "AI・機械学習",     "material": "大規模言語モデル基礎"},
-    {"database_id": "2ca223f6715381128502ff3f3edc123e", "subject": "AI・機械学習",     "material": "大規模言語モデル応用"},
-    {"database_id": "2ca223f67153817ea892cf6eae459a83", "subject": "AI・機械学習",     "material": "AI経営寄付講座"},
-    {"database_id": "2ca223f671538110ac94c84866a7223f", "subject": "AI・機械学習",     "material": "実践へのBridge講座"},
-    {"database_id": "2ca223f6715381ffbb3ec25d59c18ad1", "subject": "AI・機械学習",     "material": "ゼロから作るDeep Learning❷"},
-    {"database_id": "2ca223f671538165bd9df2ac4e378a9a", "subject": "AI・機械学習",     "material": "Kaggle"},
-    {"database_id": "2ca223f671538143b4aee50c9d6f3ab2", "subject": "統計・データ分析", "material": "統計検定2級対策講座"},
-    {"database_id": "2ca223f6715381718bfdc67a838c46fc", "subject": "統計・データ分析", "material": "統計学が最強の学問である"},
-    {"database_id": "2d3223f6715381b4b889d82c9dfecc13", "subject": "ビジネス",         "material": "1億人のための統計解析"},
-    {"database_id": "300223f6715381259c2be6ef25fd2a10", "subject": "AI・機械学習",     "material": "JOAI Competition 2026"},
-]
+# fetch_notion_dbs()でスキップするステータス
+SKIP_STATUSES = {"完了", "読了", "勉強完了"}
 
 # Notionプロパティ名マッピング
 PROPERTY_MAP = {
@@ -279,6 +257,86 @@ def fetch_notion_data(notion: Client, db_id: str, db_name: str = "") -> list[dic
     return records
 
 
+def fetch_notion_dbs(notion: Client) -> list[dict]:
+    """
+    教材管理DBを自動スキャンし、NOTION_DBSと同形式のリストを返す。
+
+    処理フロー:
+      1. 教材管理DB（NOTION_MASTER_DB_ID）の全ページ（= 教材一覧）を取得
+      2. ステータスが「完了」のページはスキップ
+      3. 各ページのブロックを取得し、child_databaseブロック（勉強メモDB）のIDを取得
+      4. カテゴリ・教材名をページのプロパティから取得
+
+    戻り値の形式（NOTION_DBSと同じ）:
+      [{"database_id": "...", "subject": "語学・英語", "material": "瞬間英作文"}, ...]
+    """
+    if not NOTION_MASTER_DB_ID:
+        logger.error("NOTION_MASTER_DB_IDが設定されていません（.envを確認）")
+        return []
+
+    result = []
+    has_more = True
+    start_cursor = None
+
+    logger.info(f"  教材管理DBをスキャン中... (ID: {NOTION_MASTER_DB_ID})")
+
+    while has_more:
+        kwargs = {"database_id": NOTION_MASTER_DB_ID, "page_size": 100}
+        if start_cursor:
+            kwargs["start_cursor"] = start_cursor
+
+        response = notion.databases.query(**kwargs)
+        pages = response.get("results", [])
+
+        for page in pages:
+            props = page.get("properties", {})
+
+            # ステータスが「完了」はスキップ（勉強中・未着手のみ対象）
+            status_prop = props.get("ステータス", {})
+            if status_prop.get("type") == "status":
+                status_obj = status_prop.get("status") or {}
+                if status_obj.get("name") in SKIP_STATUSES:
+                    continue
+
+            # 教材名（titleタイプのプロパティを自動検出）
+            material = ""
+            for prop in props.values():
+                if prop.get("type") == "title":
+                    material = _get_text(prop)
+                    break
+            if not material:
+                continue
+
+            # カテゴリ（selectタイプ）
+            subject = ""
+            category_prop = props.get("カテゴリ", {})
+            if category_prop.get("type") == "select":
+                select_obj = category_prop.get("select") or {}
+                subject = select_obj.get("name", "")
+
+            # 子DBを検索（ページ内のchild_databaseブロック）
+            page_id = page["id"]
+            try:
+                blocks = notion.blocks.children.list(block_id=page_id)
+                for block in blocks.get("results", []):
+                    if block.get("type") == "child_database":
+                        # APIが返すIDはハイフン付き → 削除してNOTION_DBSと同形式に
+                        child_db_id = block["id"].replace("-", "")
+                        result.append({
+                            "database_id": child_db_id,
+                            "subject": subject,
+                            "material": material,
+                        })
+            except Exception as e:
+                logger.error(f"  ブロック取得エラー ({material}): {e}")
+
+        has_more = response.get("has_more", False)
+        start_cursor = response.get("next_cursor")
+
+    logger.info(f"  スキャン完了: {len(result)} 件の勉強メモDBを検出")
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Plotly グラフ生成
 # ---------------------------------------------------------------------------
@@ -292,10 +350,12 @@ PLOTLY_FONT = dict(
 )
 
 
-def create_study_graphs(df: pd.DataFrame) -> str:
+def create_study_graphs(df: pd.DataFrame, notion_dbs: list[dict]) -> str:
     """
     学習データから9種類のグラフをタブ切り替えで表示するHTMLダッシュボードを生成して返す。
     戻り値は <!DOCTYPE html> から始まる完全なHTML文字列。
+
+    notion_dbs: fetch_notion_dbs()の戻り値（material→subjectのマッピングに使用）
     """
     if df.empty:
         logger.warning("データが空のためグラフをスキップします")
@@ -306,8 +366,8 @@ def create_study_graphs(df: pd.DataFrame) -> str:
     df = df.dropna(subset=["study_date", "study_minutes"])
     df = df.sort_values("study_date")
 
-    # subject列を追加（NOTION_DBSのmaterial→subject対応）
-    subject_map = {db["material"]: db["subject"] for db in NOTION_DBS}
+    # subject列を追加（notion_dbsのmaterial→subject対応）
+    subject_map = {db["material"]: db["subject"] for db in notion_dbs}
     df["subject"] = df["db_name"].map(subject_map).fillna("その他")
 
     CATEGORY_ORDER = ["語学・英語", "AI・機械学習", "統計・データ分析", "ビジネス", "その他"]
@@ -781,8 +841,8 @@ def main() -> None:
     if not NOTION_TOKEN:
         logger.error("NOTION_TOKEN が設定されていません（.envを確認）")
         return
-    if not NOTION_DBS:
-        logger.error("NOTION_DBS が空です（notion_sync_v5.py内のリストを確認）")
+    if not NOTION_MASTER_DB_ID:
+        logger.error("NOTION_MASTER_DB_ID が設定されていません（.envを確認）")
         return
     if not SQL_SERVER:
         logger.error("SQL_SERVER が設定されていません（.envを確認）")
@@ -790,10 +850,17 @@ def main() -> None:
 
     notion = Client(auth=NOTION_TOKEN)
 
-    # --- Step 1: Notionからデータ取得 ---
-    logger.info("[Step 1] Notionからデータを取得中...")
+    # --- Step 1: 教材管理DBを自動スキャン ---
+    logger.info("[Step 1a] 教材管理DBをスキャン中...")
+    notion_dbs = fetch_notion_dbs(notion)
+    if not notion_dbs:
+        logger.error("勉強メモDBが1件も検出されませんでした（教材管理DBを確認）")
+        return
+
+    # --- Step 1b: Notionからデータ取得 ---
+    logger.info("[Step 1b] Notionからデータを取得中...")
     all_records: list[dict] = []
-    for db in NOTION_DBS:
+    for db in notion_dbs:
         db_id = db["database_id"]
         material = db["material"]
         try:
@@ -833,7 +900,7 @@ def main() -> None:
     # --- Step 3: Plotlyグラフ生成 ---
     logger.info("[Step 3] Plotlyグラフを生成中...")
     df = pd.DataFrame(all_records)
-    html_content = create_study_graphs(df)
+    html_content = create_study_graphs(df, notion_dbs)
 
     # --- Step 4: S3にアップロード ---
     logger.info("[Step 4] AWS S3にアップロード中...")

@@ -4,6 +4,7 @@ import streamlit as st
 from notion_client import Client
 from dotenv import load_dotenv
 from datetime import datetime, date
+from notion_utils import fetch_notion_dbs
 
 # .envファイルを絶対パスで読み込む
 env_path = Path(__file__).parent / ".env"
@@ -18,26 +19,15 @@ if not os.getenv("NOTION_TOKEN"):
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 notion = Client(auth=NOTION_TOKEN)
 
-NOTION_DBS = [
-    {"database_id": "2ca223f671538122a535e7f41d900af6", "subject": "語学・英語", "material": "瞬間英作文"},
-    {"database_id": "2ca223f671538175b4b3d5c2d380071e", "subject": "語学・英語", "material": "でる1000問"},
-    {"database_id": "2ca223f6715381608585ca15a5e3b62e", "subject": "語学・英語", "material": "金の読解"},
-    {"database_id": "2ca223f6715381a9866bee5796934ba2", "subject": "語学・英語", "material": "公式TOEIC問題集8"},
-    {"database_id": "2ca223f671538102ae62d797b83308a1", "subject": "語学・英語", "material": "金のパッケージ"},
-    {"database_id": "2ca223f6715381e8b814df983ca2b559", "subject": "語学・英語", "material": "AI英会話"},
-    {"database_id": "2ca223f6715381f3b3f5e25f66e4d97e", "subject": "語学・英語", "material": "オリジナル瞬間英作文"},
-    {"database_id": "2ca223f671538189828 1c07c90e44853", "subject": "AI・機械学習", "material": "大規模言語モデル基礎"},
-    {"database_id": "2ca223f6715381128502ff3f3edc123e", "subject": "AI・機械学習", "material": "大規模言語モデル応用"},
-    {"database_id": "2ca223f67153817ea892cf6eae459a83", "subject": "AI・機械学習", "material": "AI経営寄付講座"},
-    {"database_id": "2ca223f671538110ac94c84866a7223f", "subject": "AI・機械学習", "material": "実践へのBridge講座"},
-    {"database_id": "2ca223f6715381ffbb3ec25d59c18ad1", "subject": "AI・機械学習", "material": "ゼロから作るDL"},
-    {"database_id": "2ca223f671538165bd9df2ac4e378a9a", "subject": "AI・機械学習", "material": "Kaggle"},
-    {"database_id": "2ca223f671538143b4aee50c9d6f3ab2", "subject": "統計・データ分析", "material": "統計検定"},
-    {"database_id": "2ca223f6715381718bfdc67a838c46fc", "subject": "統計・データ分析", "material": "統計学が最強"},
-    {"database_id": "2d3223f6715381b4b889d82c9dfecc13", "subject": "ビジネス", "material": "1億人のための統計解析"},
-    {"database_id": "300223f6715381259c2be6ef25fd2a10", "subject": "AI・機械学習", "material": "JOAI Competition"},
-]
 
+@st.cache_data(ttl=3600)
+def load_notion_dbs() -> list[dict]:
+    """教材管理DBを自動スキャンして返す（1時間キャッシュ）。"""
+    _notion = Client(auth=os.getenv("NOTION_TOKEN"))
+    return fetch_notion_dbs(_notion)
+
+
+NOTION_DBS = load_notion_dbs()
 MATERIAL_OPTIONS = {f"{i+1}. [{db['subject']}] {db['material']}": i for i, db in enumerate(NOTION_DBS)}
 
 WEEKDAY_JP = ["月", "火", "水", "木", "金", "土", "日"]

@@ -23,6 +23,7 @@ import plotly.graph_objects as go
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 from notion_client import Client
+from notion_utils import fetch_notion_dbs, SKIP_STATUSES
 from plotly.subplots import make_subplots
 
 # ---------------------------------------------------------------------------
@@ -51,9 +52,6 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
-
-# fetch_notion_dbs()でスキップするステータス
-SKIP_STATUSES = {"完了", "読了", "勉強完了"}
 
 # Notionプロパティ名マッピング
 PROPERTY_MAP = {
@@ -255,86 +253,6 @@ def fetch_notion_data(notion: Client, db_id: str, db_name: str = "") -> list[dic
 
     logger.info(f"  取得: {len(records)} 件 ({db_name or db_id})")
     return records
-
-
-def fetch_notion_dbs(notion: Client) -> list[dict]:
-    """
-    教材管理DBを自動スキャンし、NOTION_DBSと同形式のリストを返す。
-
-    処理フロー:
-      1. 教材管理DB（NOTION_MASTER_DB_ID）の全ページ（= 教材一覧）を取得
-      2. ステータスが「完了」のページはスキップ
-      3. 各ページのブロックを取得し、child_databaseブロック（勉強メモDB）のIDを取得
-      4. カテゴリ・教材名をページのプロパティから取得
-
-    戻り値の形式（NOTION_DBSと同じ）:
-      [{"database_id": "...", "subject": "語学・英語", "material": "瞬間英作文"}, ...]
-    """
-    if not NOTION_MASTER_DB_ID:
-        logger.error("NOTION_MASTER_DB_IDが設定されていません（.envを確認）")
-        return []
-
-    result = []
-    has_more = True
-    start_cursor = None
-
-    logger.info(f"  教材管理DBをスキャン中... (ID: {NOTION_MASTER_DB_ID})")
-
-    while has_more:
-        kwargs = {"database_id": NOTION_MASTER_DB_ID, "page_size": 100}
-        if start_cursor:
-            kwargs["start_cursor"] = start_cursor
-
-        response = notion.databases.query(**kwargs)
-        pages = response.get("results", [])
-
-        for page in pages:
-            props = page.get("properties", {})
-
-            # ステータスが「完了」はスキップ（勉強中・未着手のみ対象）
-            status_prop = props.get("ステータス", {})
-            if status_prop.get("type") == "status":
-                status_obj = status_prop.get("status") or {}
-                if status_obj.get("name") in SKIP_STATUSES:
-                    continue
-
-            # 教材名（titleタイプのプロパティを自動検出）
-            material = ""
-            for prop in props.values():
-                if prop.get("type") == "title":
-                    material = _get_text(prop)
-                    break
-            if not material:
-                continue
-
-            # カテゴリ（selectタイプ）
-            subject = ""
-            category_prop = props.get("カテゴリ", {})
-            if category_prop.get("type") == "select":
-                select_obj = category_prop.get("select") or {}
-                subject = select_obj.get("name", "")
-
-            # 子DBを検索（ページ内のchild_databaseブロック）
-            page_id = page["id"]
-            try:
-                blocks = notion.blocks.children.list(block_id=page_id)
-                for block in blocks.get("results", []):
-                    if block.get("type") == "child_database":
-                        # APIが返すIDはハイフン付き → 削除してNOTION_DBSと同形式に
-                        child_db_id = block["id"].replace("-", "")
-                        result.append({
-                            "database_id": child_db_id,
-                            "subject": subject,
-                            "material": material,
-                        })
-            except Exception as e:
-                logger.error(f"  ブロック取得エラー ({material}): {e}")
-
-        has_more = response.get("has_more", False)
-        start_cursor = response.get("next_cursor")
-
-    logger.info(f"  スキャン完了: {len(result)} 件の勉強メモDBを検出")
-    return result
 
 
 # ---------------------------------------------------------------------------

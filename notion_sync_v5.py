@@ -130,6 +130,31 @@ def ensure_table_exists(cursor) -> None:
     logger.info("テーブル確認完了（存在しない場合は新規作成）")
 
 
+def ensure_columns_exist(cursor) -> None:
+    """
+    StudyNotesテーブルに不足カラムをALTERで追加する。
+    既に存在する場合はスキップする（冪等）。
+    """
+    new_columns = [
+        ("subject",         "NVARCHAR(100)"),
+        ("study_start",     "DATETIME"),
+        ("study_end",       "DATETIME"),
+        ("material_status", "NVARCHAR(50)"),
+    ]
+    for col_name, col_type in new_columns:
+        cursor.execute("""
+            IF NOT EXISTS (
+                SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_NAME = 'StudyNotes' AND COLUMN_NAME = ?
+            )
+            BEGIN
+                EXEC('ALTER TABLE StudyNotes ADD {} {}')
+            END
+        """.format(col_name, col_type), (col_name,))
+    cursor.connection.commit()
+    logger.info("カラム確認完了（不足分を追加）")
+
+
 def upsert_record(cursor, record: dict) -> None:
     """
     1件のレコードをUPSERTする。
@@ -140,28 +165,36 @@ def upsert_record(cursor, record: dict) -> None:
     cursor.execute("""
         MERGE INTO StudyNotes AS target
         USING (VALUES (
-            ?, ?, ?, ?, ?, ?, ?, ?
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         )) AS source (
             notion_page_id, db_name, study_date, chapter,
-            key_points, questions, insights, study_minutes
+            key_points, questions, insights, study_minutes,
+            subject, study_start, study_end, material_status
         )
         ON target.notion_page_id = source.notion_page_id
         WHEN MATCHED THEN
             UPDATE SET
-                db_name       = source.db_name,
-                study_date    = source.study_date,
-                chapter       = source.chapter,
-                key_points    = source.key_points,
-                questions     = source.questions,
-                insights      = source.insights,
-                study_minutes = source.study_minutes,
-                updated_at    = GETDATE()
+                db_name         = source.db_name,
+                study_date      = source.study_date,
+                chapter         = source.chapter,
+                key_points      = source.key_points,
+                questions       = source.questions,
+                insights        = source.insights,
+                study_minutes   = source.study_minutes,
+                subject         = source.subject,
+                study_start     = source.study_start,
+                study_end       = source.study_end,
+                material_status = source.material_status,
+                updated_at      = GETDATE()
         WHEN NOT MATCHED THEN
             INSERT (notion_page_id, db_name, study_date, chapter,
-                    key_points, questions, insights, study_minutes)
+                    key_points, questions, insights, study_minutes,
+                    subject, study_start, study_end, material_status)
             VALUES (source.notion_page_id, source.db_name, source.study_date,
                     source.chapter, source.key_points, source.questions,
-                    source.insights, source.study_minutes);
+                    source.insights, source.study_minutes,
+                    source.subject, source.study_start, source.study_end,
+                    source.material_status);
     """, (
         record["notion_page_id"],
         record["db_name"],
@@ -171,6 +204,10 @@ def upsert_record(cursor, record: dict) -> None:
         record["questions"],
         record["insights"],
         record["study_minutes"],
+        record.get("subject"),
+        record.get("study_start"),
+        record.get("study_end"),
+        record.get("material_status"),
     ))
 
 
@@ -225,6 +262,8 @@ def fetch_notion_data(notion: Client, db_id: str, db_name: str = "") -> list[dic
 
             # 「学習時間」はdate型（開始〜終了時刻）なので差分を分に換算する
             study_minutes = None
+            study_start = None
+            study_end = None
             time_prop = props.get("学習時間", {}).get("date")
             if time_prop:
                 start = time_prop.get("start")
@@ -234,6 +273,8 @@ def fetch_notion_data(notion: Client, db_id: str, db_name: str = "") -> list[dic
                         s = datetime.fromisoformat(start)
                         e = datetime.fromisoformat(end)
                         study_minutes = (e - s).total_seconds() / 60
+                        study_start = s.replace(tzinfo=None)
+                        study_end = e.replace(tzinfo=None)
                     except (ValueError, TypeError):
                         study_minutes = None
 
@@ -246,6 +287,8 @@ def fetch_notion_data(notion: Client, db_id: str, db_name: str = "") -> list[dic
                 "questions":      _get_text(props.get(pmap["questions"])),
                 "insights":       _get_text(props.get(pmap["insights"])),
                 "study_minutes":  study_minutes,
+                "study_start":    study_start,
+                "study_end":      study_end,
             })
 
         has_more = response.get("has_more", False)
@@ -267,7 +310,7 @@ def load_df_from_sql() -> pd.DataFrame | None:
     try:
         conn = get_db_connection()
         query = """
-            SELECT study_date, study_minutes, db_name
+            SELECT study_date, study_minutes, db_name, subject
             FROM StudyNotes
             WHERE study_date IS NOT NULL
             ORDER BY study_date
@@ -299,7 +342,7 @@ def create_study_graphs(df: pd.DataFrame, notion_dbs: list[dict]) -> str:
     学習データから9種類のグラフをタブ切り替えで表示するHTMLダッシュボードを生成して返す。
     戻り値は <!DOCTYPE html> から始まる完全なHTML文字列。
 
-    notion_dbs: fetch_notion_dbs()の戻り値（material→subjectのマッピングに使用）
+    notion_dbs: fetch_notion_dbs()の戻り値（フォールバック時のマッピングに使用）
     """
     if df.empty:
         logger.warning("データが空のためグラフをスキップします")
@@ -310,9 +353,14 @@ def create_study_graphs(df: pd.DataFrame, notion_dbs: list[dict]) -> str:
     df = df.dropna(subset=["study_date", "study_minutes"])
     df = df.sort_values("study_date")
 
-    # subject列を追加（notion_dbsのmaterial→subject対応）
-    subject_map = {db["material"]: db["subject"] for db in notion_dbs}
-    df["subject"] = df["db_name"].map(subject_map).fillna("その他")
+    # subject列の確定:
+    #   SQL Server起点の場合: subjectカラムが既に存在するのでそのまま使う
+    #   フォールバック時（Notionデータ）: notion_dbsでマッピングして生成する
+    if "subject" in df.columns:
+        df["subject"] = df["subject"].fillna("その他")
+    else:
+        subject_map = {db["material"]: db["subject"] for db in notion_dbs}
+        df["subject"] = df["db_name"].map(subject_map).fillna("その他")
 
     CATEGORY_ORDER = ["語学・英語", "AI・機械学習", "統計・データ分析", "ビジネス", "その他"]
     CATEGORY_COLORS = {
@@ -805,10 +853,15 @@ def main() -> None:
     logger.info("[Step 1b] Notionからデータを取得中...")
     all_records: list[dict] = []
     for db in notion_dbs:
-        db_id = db["database_id"]
-        material = db["material"]
+        db_id       = db["database_id"]
+        material    = db["material"]
+        subject     = db.get("subject", "")
+        status      = db.get("status", "")
         try:
             records = fetch_notion_data(notion, db_id, material)
+            for r in records:
+                r["subject"]         = subject
+                r["material_status"] = status
             all_records.extend(records)
         except Exception as e:
             logger.error(f"  DB取得エラー ({material}): {e}")
@@ -825,6 +878,7 @@ def main() -> None:
         conn = get_db_connection()
         cursor = conn.cursor()
         ensure_table_exists(cursor)
+        ensure_columns_exist(cursor)
 
         upsert_count = 0
         for record in all_records:

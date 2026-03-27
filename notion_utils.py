@@ -71,10 +71,12 @@ def fetch_notion_dbs(notion: Client) -> list[dict]:
             props = page.get("properties", {})
 
             # ステータスがスキップ対象はスキップ（勉強中・未着手のみ対象）
+            status_name = ""
             status_prop = props.get("ステータス", {})
             if status_prop.get("type") == "status":
                 status_obj = status_prop.get("status") or {}
-                if status_obj.get("name") in SKIP_STATUSES:
+                status_name = status_obj.get("name", "")
+                if status_name in SKIP_STATUSES:
                     continue
 
             # 教材名（titleタイプのプロパティを自動検出）
@@ -103,8 +105,9 @@ def fetch_notion_dbs(notion: Client) -> list[dict]:
                         child_db_id = block["id"].replace("-", "")
                         result.append({
                             "database_id": child_db_id,
-                            "subject": subject,
-                            "material": material,
+                            "subject":     subject,
+                            "material":    material,
+                            "status":      status_name,
                         })
             except Exception as e:
                 logger.error(f"  ブロック取得エラー ({material}): {e}")

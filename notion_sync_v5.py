@@ -256,6 +256,32 @@ def fetch_notion_data(notion: Client, db_id: str, db_name: str = "") -> list[dic
 
 
 # ---------------------------------------------------------------------------
+# SQL Server → DataFrame 読み込み
+# ---------------------------------------------------------------------------
+
+def load_df_from_sql() -> pd.DataFrame | None:
+    """
+    StudyNotesテーブルからグラフ用データを取得してDataFrameで返す。
+    失敗した場合はNoneを返す（呼び出し元でNotionデータにフォールバック）。
+    """
+    try:
+        conn = get_db_connection()
+        query = """
+            SELECT study_date, study_minutes, db_name
+            FROM StudyNotes
+            WHERE study_date IS NOT NULL
+            ORDER BY study_date
+        """
+        df = pd.read_sql(query, conn)
+        conn.close()
+        logger.info(f"  SQL Serverからグラフ用データ取得: {len(df)} 件")
+        return df
+    except Exception as e:
+        logger.error(f"  SQL Serverからのデータ取得失敗: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Plotly グラフ生成
 # ---------------------------------------------------------------------------
 
@@ -817,7 +843,10 @@ def main() -> None:
 
     # --- Step 3: Plotlyグラフ生成 ---
     logger.info("[Step 3] Plotlyグラフを生成中...")
-    df = pd.DataFrame(all_records)
+    df = load_df_from_sql()
+    if df is None:
+        logger.warning("  SQL Server取得失敗のためNotionデータでフォールバック")
+        df = pd.DataFrame(all_records)
     html_content = create_study_graphs(df, notion_dbs)
 
     # --- Step 4: S3にアップロード ---

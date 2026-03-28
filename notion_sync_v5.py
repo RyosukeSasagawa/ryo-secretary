@@ -758,6 +758,52 @@ def create_study_graphs(df: pd.DataFrame, notion_dbs: list[dict]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# AWS S3 ライフサイクルルール設定
+# ---------------------------------------------------------------------------
+
+def setup_s3_lifecycle() -> None:
+    """
+    S3バケットにライフサイクルルールを設定する（冪等）。
+    30日以上経過した study_graph_ プレフィックスのHTMLファイルを自動削除。
+    ルールが既に存在する場合はスキップする。
+    """
+    s3 = boto3.client(
+        "s3",
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+        region_name=AWS_REGION_NAME,
+    )
+    rule_id = "delete-old-graphs"
+
+    try:
+        response = s3.get_bucket_lifecycle_configuration(Bucket=AWS_BUCKET_NAME)
+        existing_rules = response.get("Rules", [])
+        if any(r["ID"] == rule_id for r in existing_rules):
+            logger.info(f"S3ライフサイクルルール「{rule_id}」は設定済み（スキップ）")
+            return
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "NoSuchLifecycleConfiguration":
+            logger.error(f"S3ライフサイクル設定取得エラー: {e}")
+            return
+        existing_rules = []
+
+    new_rule = {
+        "ID": rule_id,
+        "Status": "Enabled",
+        "Filter": {"Prefix": "study_graph_"},
+        "Expiration": {"Days": 30},
+    }
+    try:
+        s3.put_bucket_lifecycle_configuration(
+            Bucket=AWS_BUCKET_NAME,
+            LifecycleConfiguration={"Rules": existing_rules + [new_rule]},
+        )
+        logger.info(f"S3ライフサイクルルール「{rule_id}」を設定しました（30日で自動削除）")
+    except ClientError as e:
+        logger.error(f"S3ライフサイクルルール設定失敗: {e}")
+
+
+# ---------------------------------------------------------------------------
 # AWS S3 アップロード
 # ---------------------------------------------------------------------------
 
@@ -902,6 +948,10 @@ def main() -> None:
         logger.warning("  SQL Server取得失敗のためNotionデータでフォールバック")
         df = pd.DataFrame(all_records)
     html_content = create_study_graphs(df, notion_dbs)
+
+    # --- Step 4 前: S3ライフサイクルルール確認（初回のみ設定・以降はスキップ）---
+    logger.info("[Step 4 前] S3ライフサイクルルールを確認中...")
+    setup_s3_lifecycle()
 
     # --- Step 4: S3にアップロード ---
     logger.info("[Step 4] AWS S3にアップロード中...")

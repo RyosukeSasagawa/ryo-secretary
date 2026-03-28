@@ -5,6 +5,7 @@ from notion_client import Client
 from dotenv import load_dotenv
 from datetime import datetime, date
 from notion_utils import fetch_notion_dbs
+from notion_sync_v5 import get_db_connection, ensure_goals_table_exists
 
 # .envファイルを絶対パスで読み込む
 env_path = Path(__file__).parent / ".env"
@@ -252,6 +253,24 @@ if "recent_records" not in st.session_state:
 st.set_page_config(page_title="AI学習記録秘書", page_icon="📚")
 st.title("📚 AI学習記録秘書")
 
+GOAL_CATEGORIES = ["語学・英語", "AI・機械学習", "統計・データ分析", "ビジネス", "コンピューター・IT"]
+
+
+@st.cache_data(ttl=300)
+def load_goals() -> dict:
+    """StudyGoalsテーブルから月間目標を取得する（5分キャッシュ）。"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        ensure_goals_table_exists(cursor)
+        cursor.execute("SELECT goal_type, monthly_hours FROM StudyGoals")
+        result = {row[0]: row[1] for row in cursor.fetchall() if row[1] is not None}
+        conn.close()
+        return result
+    except Exception:
+        return {}
+
+
 # ── サイドバー: セッション終了ボタン ─────────────────────────────────────────
 with st.sidebar:
     st.markdown("### メニュー")
@@ -259,6 +278,46 @@ with st.sidebar:
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         st.rerun()
+
+    st.markdown("---")
+    st.markdown("### 🎯 月間目標設定（時間）")
+    current_goals = load_goals()
+    goal_inputs = {}
+    for cat in GOAL_CATEGORIES:
+        goal_inputs[cat] = st.number_input(
+            cat,
+            min_value=0,
+            max_value=500,
+            value=int(current_goals.get(cat, 0)),
+            step=5,
+            key=f"goal_{cat}",
+        )
+    total_hours = sum(goal_inputs.values())
+    st.metric("全体合計", f"{total_hours} 時間")
+    if st.button("💾 目標を保存", use_container_width=True):
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            ensure_goals_table_exists(cursor)
+            save_goals = {**goal_inputs, "total": float(total_hours)}
+            for cat, hours in save_goals.items():
+                cursor.execute("""
+                    MERGE INTO StudyGoals AS target
+                    USING (VALUES (?, ?)) AS source (goal_type, monthly_hours)
+                    ON target.goal_type = source.goal_type
+                    WHEN MATCHED THEN
+                        UPDATE SET monthly_hours = source.monthly_hours,
+                                   updated_at    = GETDATE()
+                    WHEN NOT MATCHED THEN
+                        INSERT (goal_type, monthly_hours)
+                        VALUES (source.goal_type, source.monthly_hours);
+                """, (cat, float(hours)))
+            conn.commit()
+            conn.close()
+            load_goals.clear()
+            st.success("保存しました！")
+        except Exception as e:
+            st.error(f"保存失敗: {e}")
 
 # ── チャット履歴を表示 ────────────────────────────────────────────────────────
 for msg in st.session_state.messages:

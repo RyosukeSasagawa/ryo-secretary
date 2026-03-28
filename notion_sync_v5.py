@@ -129,6 +129,29 @@ def ensure_table_exists(cursor) -> None:
     logger.info("テーブル確認完了（存在しない場合は新規作成）")
 
 
+def ensure_goals_table_exists(cursor) -> None:
+    """
+    StudyGoalsテーブルが存在しない場合のみ CREATE する（冪等）。
+    goal_type を UNIQUE キーとして UPSERT で目標値を管理する。
+    """
+    cursor.execute("""
+        IF NOT EXISTS (
+            SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_NAME = 'StudyGoals'
+        )
+        BEGIN
+            CREATE TABLE StudyGoals (
+                id            INT IDENTITY(1,1) PRIMARY KEY,
+                goal_type     NVARCHAR(50) NOT NULL,
+                monthly_hours FLOAT,
+                updated_at    DATETIME DEFAULT GETDATE(),
+                CONSTRAINT UQ_goal_type UNIQUE (goal_type)
+            )
+        END
+    """)
+    cursor.connection.commit()
+
+
 def ensure_columns_exist(cursor) -> None:
     """
     StudyNotesテーブルに不足カラムをALTERで追加する。
@@ -301,6 +324,25 @@ def fetch_notion_data(notion: Client, db_id: str, db_name: str = "") -> list[dic
 # SQL Server → DataFrame 読み込み
 # ---------------------------------------------------------------------------
 
+def load_goals_from_sql() -> dict:
+    """
+    StudyGoalsテーブルから月間目標を取得して dict 形式で返す。
+    テーブル未作成・データなし・接続失敗のいずれも空dictを返す（グラフ側で処理）。
+    例: {"total": 50, "語学・英語": 30, "AI・機械学習": 20}
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        ensure_goals_table_exists(cursor)
+        cursor.execute("SELECT goal_type, monthly_hours FROM StudyGoals")
+        result = {row[0]: row[1] for row in cursor.fetchall() if row[1] is not None}
+        conn.close()
+        return result
+    except Exception as e:
+        logger.error(f"  目標取得失敗: {e}")
+        return {}
+
+
 def load_df_from_sql() -> pd.DataFrame | None:
     """
     StudyNotesテーブルからグラフ用データを取得してDataFrameで返す。
@@ -391,6 +433,7 @@ def create_study_graphs(df: pd.DataFrame, notion_dbs: list[dict]) -> str:
         "⑧ 曜日別平均",
         "⑨ 週別カテゴリ推移",
         "🔥 Streak",
+        "🎯 今月の進捗",
     ]
     figs = []
 
@@ -737,6 +780,98 @@ def create_study_graphs(df: pd.DataFrame, notion_dbs: list[dict]) -> str:
     )
     fig10.update_xaxes(title_text="連続日数", row=2, col=1)
     figs.append(fig10)
+
+    # ------------------------------------------------------------------
+    # Graph 11: 今月の進捗（目標 vs 実績）
+    # StudyGoalsテーブルから目標を取得し、今月の実績と比較する。
+    # 目標が1件も設定されていない場合はメッセージを表示するのみ。
+    # ------------------------------------------------------------------
+    goals = load_goals_from_sql()
+    this_month_start = pd.Timestamp.now().replace(day=1).normalize()
+    df_month = df[df["study_date"] >= this_month_start].copy()
+    month_label = pd.Timestamp.now().strftime("%Y年%m月")
+
+    if not goals:
+        fig11 = go.Figure()
+        fig11.add_annotation(
+            text="目標を設定してください<br><span style='font-size:14px;color:#aaa'>app.py のサイドバーから設定できます</span>",
+            xref="paper", yref="paper",
+            x=0.5, y=0.5,
+            showarrow=False,
+            font=dict(size=22, color="#999"),
+        )
+        fig11.update_layout(
+            title=f"今月の進捗（{month_label}）",
+            font=PLOTLY_FONT,
+            paper_bgcolor="#FFFFFF",
+            height=300,
+            margin=dict(l=40, r=40, t=60, b=40),
+        )
+    else:
+        def _goal_color(pct: float) -> str:
+            if pct >= 100:
+                return "#52B788"   # 緑
+            if pct >= 80:
+                return "#C5E384"   # 黄緑
+            if pct >= 50:
+                return "#F4A261"   # オレンジ
+            return "#E85C4C"       # 赤
+
+        rows_g = []
+        # 全体合計
+        if "total" in goals:
+            actual_h = df_month["study_minutes"].sum() / 60
+            goal_h = goals["total"]
+            rows_g.append(("全体合計", actual_h, goal_h))
+        # カテゴリ別
+        for cat in CATEGORY_ORDER:
+            if cat in goals:
+                actual_h = df_month[df_month["subject"] == cat]["study_minutes"].sum() / 60
+                goal_h = goals[cat]
+                rows_g.append((cat, actual_h, goal_h))
+
+        g_labels  = [r[0] for r in rows_g]
+        g_actuals = [r[1] for r in rows_g]
+        g_goals   = [r[2] for r in rows_g]
+        g_pcts    = [a / g * 100 if g > 0 else 0 for a, g in zip(g_actuals, g_goals)]
+        g_colors  = [_goal_color(p) for p in g_pcts]
+        g_texts   = [
+            f"{a:.1f}h / {g:.0f}h（{p:.0f}%）"
+            for a, g, p in zip(g_actuals, g_goals, g_pcts)
+        ]
+
+        max_x = max(max(g_actuals + g_goals, default=1) * 1.4, 1)
+
+        fig11 = go.Figure()
+        fig11.add_trace(go.Bar(
+            x=g_actuals,
+            y=g_labels,
+            orientation="h",
+            marker_color=g_colors,
+            text=g_texts,
+            textposition="outside",
+            cliponaxis=False,
+            hovertemplate="%{y}<br>%{text}<extra></extra>",
+        ))
+        # 目標値を破線で表示
+        for i, goal_h in enumerate(g_goals):
+            fig11.add_shape(
+                type="line",
+                x0=goal_h, x1=goal_h,
+                y0=i - 0.4, y1=i + 0.4,
+                line=dict(color="#555", width=2, dash="dash"),
+            )
+        fig11.update_layout(
+            title=f"今月の進捗（{month_label}）",
+            xaxis=dict(title="学習時間（時間）", range=[0, max_x]),
+            showlegend=False,
+            font=PLOTLY_FONT,
+            paper_bgcolor="#FFFFFF",
+            plot_bgcolor="#FAFAFA",
+            height=max(300, len(rows_g) * 70 + 120),
+            margin=dict(l=150, r=160, t=60, b=40),
+        )
+    figs.append(fig11)
 
     # ------------------------------------------------------------------
     # タブHTMLの組み立て

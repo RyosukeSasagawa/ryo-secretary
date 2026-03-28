@@ -16,7 +16,6 @@ import os
 import logging
 from datetime import datetime
 
-import numpy as np
 import boto3
 import pandas as pd
 import plotly.graph_objects as go
@@ -491,7 +490,9 @@ def create_study_graphs(df: pd.DataFrame, notion_dbs: list[dict]) -> str:
     figs.append(fig4)
 
     # ------------------------------------------------------------------
-    # Graph 5: 直近30日ヒートマップ（GitHub草スタイル、緑のカラースケール）
+    # Graph 5: 直近30日ヒートマップ（1行×30列・月またぎ対応）
+    # X軸 = 日付（MM/DD）、Y軸 = 1行のみ
+    # 0分の日はグレー、学習した日は緑の濃淡で表示
     # ------------------------------------------------------------------
     today = pd.Timestamp.now().normalize()
     start_30 = today - pd.Timedelta(days=29)
@@ -499,32 +500,14 @@ def create_study_graphs(df: pd.DataFrame, notion_dbs: list[dict]) -> str:
     date_range_30 = pd.date_range(start=start_30, end=today)
     daily_full = daily_30.reindex(date_range_30, fill_value=0)
 
-    weekday_labels = ["月", "火", "水", "木", "金", "土", "日"]
-    start_wd = date_range_30[0].weekday()  # 最初の日の曜日（0=月）
-    n_weeks = (len(date_range_30) - 1 + start_wd) // 7 + 1
-
-    z_heat = np.full((7, n_weeks), np.nan)
-    text_heat = [[""] * n_weeks for _ in range(7)]
-
-    for i, (date, minutes) in enumerate(zip(date_range_30, daily_full.values)):
-        col = (i + start_wd) // 7
-        row = date.weekday()
-        z_heat[row][col] = float(minutes)
-        text_heat[row][col] = f"{date.strftime('%m/%d')}<br>{minutes:.0f}分"
-
-    # 各週の月曜日をX軸ラベルに使用
-    week_labels = []
-    for col in range(n_weeks):
-        for i, date in enumerate(date_range_30):
-            if (i + start_wd) // 7 == col:
-                monday = date - pd.Timedelta(days=date.weekday())
-                week_labels.append(monday.strftime("%m/%d"))
-                break
+    x_labels_30 = [d.strftime("%m/%d") for d in date_range_30]
+    z_30 = [[float(v) for v in daily_full.values]]
+    text_30 = [[f"{d.strftime('%m/%d')}<br>{v:.0f}分" for d, v in zip(date_range_30, daily_full.values)]]
 
     fig5 = go.Figure(data=go.Heatmap(
-        z=z_heat,
-        x=week_labels,
-        y=weekday_labels,
+        z=z_30,
+        x=x_labels_30,
+        y=[""],
         colorscale=[
             [0.0,   "#ebedf0"],
             [0.001, "#c6e48b"],
@@ -533,19 +516,19 @@ def create_study_graphs(df: pd.DataFrame, notion_dbs: list[dict]) -> str:
             [1.0,   "#216e39"],
         ],
         zmin=0,
-        text=text_heat,
+        text=text_30,
         hovertemplate="%{text}<extra></extra>",
         showscale=True,
         colorbar=dict(title="分"),
     ))
     fig5.update_layout(
-        title="直近30日の学習ヒートマップ（GitHub草スタイル）",
-        yaxis=dict(autorange="reversed"),
+        title="直近30日の学習ヒートマップ",
+        xaxis=dict(tickangle=-45),
         font=PLOTLY_FONT,
         paper_bgcolor="#FFFFFF",
         plot_bgcolor="#FAFAFA",
-        margin=dict(l=60, r=30, t=60, b=40),
-        height=320,
+        margin=dict(l=40, r=30, t=60, b=60),
+        height=220,
     )
     figs.append(fig5)
 

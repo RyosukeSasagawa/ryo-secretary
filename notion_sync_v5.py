@@ -361,13 +361,14 @@ def create_study_graphs(df: pd.DataFrame, notion_dbs: list[dict]) -> str:
         subject_map = {db["material"]: db["subject"] for db in notion_dbs}
         df["subject"] = df["db_name"].map(subject_map).fillna("その他")
 
-    CATEGORY_ORDER = ["語学・英語", "AI・機械学習", "統計・データ分析", "ビジネス", "その他"]
+    CATEGORY_ORDER = ["語学・英語", "AI・機械学習", "統計・データ分析", "ビジネス", "コンピューター・IT", "その他"]
     CATEGORY_COLORS = {
-        "語学・英語":     "#4C9BE8",
-        "AI・機械学習":   "#E85C4C",
-        "統計・データ分析": "#52B788",
-        "ビジネス":       "#F4A261",
-        "その他":         "#ADB5BD",
+        "語学・英語":       "#4C9BE8",
+        "AI・機械学習":     "#E85C4C",
+        "統計・データ分析":  "#52B788",
+        "ビジネス":         "#F4A261",
+        "コンピューター・IT": "#7B61FF",
+        "その他":           "#ADB5BD",
     }
     COMMON_LAYOUT = dict(
         font=PLOTLY_FONT,
@@ -389,6 +390,7 @@ def create_study_graphs(df: pd.DataFrame, notion_dbs: list[dict]) -> str:
         "⑦ カテゴリ別円グラフ",
         "⑧ 曜日別平均",
         "⑨ 週別カテゴリ推移",
+        "🔥 Streak",
     ]
     figs = []
 
@@ -642,6 +644,99 @@ def create_study_graphs(df: pd.DataFrame, notion_dbs: list[dict]) -> str:
         **COMMON_LAYOUT,
     )
     figs.append(fig9)
+
+    # ------------------------------------------------------------------
+    # Graph 10: Streak（連続学習記録）
+    # 上段: 全体の現在Streak / 過去最長Streak（go.Indicator で大きく表示）
+    # 下段: カテゴリ別 現在Streak（横棒グラフ）
+    # ------------------------------------------------------------------
+
+    # study_minutes > 0 の日付セットを作成（正規化してdateに統一）
+    studied_dates = set(
+        df[df["study_minutes"] > 0]["study_date"].dt.normalize().tolist()
+    )
+    today_norm = pd.Timestamp.now().normalize()
+    yesterday_norm = today_norm - pd.Timedelta(days=1)
+
+    def _calc_current_streak(dates_set: set) -> int:
+        """今日または昨日から遡って連続した日数を返す。"""
+        if not dates_set:
+            return 0
+        start = today_norm if today_norm in dates_set else yesterday_norm
+        if start not in dates_set:
+            return 0
+        count = 0
+        check = start
+        while check in dates_set:
+            count += 1
+            check -= pd.Timedelta(days=1)
+        return count
+
+    def _calc_max_streak(dates_set: set) -> int:
+        """全期間の最長連続日数を返す。"""
+        if not dates_set:
+            return 0
+        sorted_d = sorted(dates_set)
+        max_s = cur = 1
+        for i in range(1, len(sorted_d)):
+            if (sorted_d[i] - sorted_d[i - 1]).days == 1:
+                cur += 1
+                max_s = max(max_s, cur)
+            else:
+                cur = 1
+        return max(max_s, cur)
+
+    overall_current = _calc_current_streak(studied_dates)
+    overall_max = _calc_max_streak(studied_dates)
+
+    # カテゴリ別 現在Streak
+    cat_streak_values = []
+    for subj in CATEGORY_ORDER:
+        cat_dates = set(
+            df[(df["study_minutes"] > 0) & (df["subject"] == subj)]["study_date"]
+            .dt.normalize().tolist()
+        )
+        cat_streak_values.append(_calc_current_streak(cat_dates))
+
+    fig10 = make_subplots(
+        rows=2, cols=2,
+        row_heights=[0.42, 0.58],
+        specs=[
+            [{"type": "indicator"}, {"type": "indicator"}],
+            [{"type": "xy", "colspan": 2}, None],
+        ],
+        subplot_titles=["現在のStreak", "過去最長Streak", "カテゴリ別 現在のStreak"],
+    )
+    fig10.add_trace(go.Indicator(
+        mode="number",
+        value=overall_current,
+        number={"suffix": " 日", "font": {"size": 80, "color": "#E85C4C"}},
+    ), row=1, col=1)
+    fig10.add_trace(go.Indicator(
+        mode="number",
+        value=overall_max,
+        number={"suffix": " 日", "font": {"size": 80, "color": "#F4A261"}},
+    ), row=1, col=2)
+    fig10.add_trace(go.Bar(
+        x=cat_streak_values,
+        y=CATEGORY_ORDER,
+        orientation="h",
+        marker_color=[CATEGORY_COLORS[s] for s in CATEGORY_ORDER],
+        text=[f"{v}日" for v in cat_streak_values],
+        textposition="outside",
+        hovertemplate="%{y}<br>%{x}日連続<extra></extra>",
+    ), row=2, col=1)
+    fig10.update_layout(
+        title="Streak（連続学習記録）",
+        showlegend=False,
+        font=PLOTLY_FONT,
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FAFAFA",
+        height=580,
+        margin=dict(l=150, r=80, t=80, b=40),
+    )
+    fig10.update_xaxes(title_text="連続日数", row=2, col=1)
+    figs.append(fig10)
 
     # ------------------------------------------------------------------
     # タブHTMLの組み立て
